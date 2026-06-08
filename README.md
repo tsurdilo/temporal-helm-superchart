@@ -123,7 +123,10 @@ The chart uses two locally-built Docker images. Build them before installing:
 bash build.sh --server-version v1.31.0
 ```
 
-This checks out that tag in `~/devel/temporal/temporal`, aligns the `go.temporal.io/api` version across all modules, then builds `temporal-custom-server:latest` and `temporal-health-poller:latest` into Docker Desktop's image cache, which Kubernetes uses directly (no registry push needed).
+This checks out that tag in `~/devel/temporal/temporal`, aligns the `go.temporal.io/api` version across all modules, then builds two images into Docker Desktop's image cache (no registry push needed):
+
+- **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in. This is what enables live dynamic config reloads from the Kubernetes ConfigMap.
+- **`temporal-health-poller`** — Sidecar that calls `AdminHandler.DeepHealthCheck` on each history pod and emits the `host_health` gauge to Prometheus.
 
 The script prints the server tag and commit it built against so you always know what is in the image:
 ```
@@ -176,7 +179,7 @@ Once installed, the following services are available directly — no port-forwar
 | Grafana | [http://localhost:30300](http://localhost:30300) | Dashboards (admin/admin) |
 | Prometheus | [http://localhost:30090](http://localhost:30090) | Metrics |
 | MinIO Console | [http://localhost:30901](http://localhost:30901) | Archival storage — login: minioadmin / minioadmin |
-| Temporal Frontend (gRPC) | `localhost:7233` | SDK target — default port, no config needed |
+| Temporal Frontend (gRPC) | `localhost:7233` | SDK target — default port, no config needed. Kubernetes load-balances across both frontend replicas automatically. |
 
 ---
 
@@ -258,7 +261,7 @@ Grafana picks up the change automatically — no restart required.
 
 ## Dynamic config
 
-Temporal's [dynamic config](https://docs.temporal.io/references/dynamic-configuration) controls hundreds of runtime parameters — rate limits, cache sizes, task queue partitions, retention policies, and more. This chart uses a Kubernetes ConfigMap as the dynamic config backend, so all changes are applied live without restarting any pods.
+Temporal's [dynamic config](https://docs.temporal.io/references/dynamic-configuration) controls hundreds of runtime parameters — rate limits, cache sizes, task queue partitions, retention policies, and more. This chart uses a Kubernetes ConfigMap as the dynamic config backend, powered by [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) — a custom dynamic config client that watches the ConfigMap via the Kubernetes Watch API and applies changes to the server live, with no pod restarts required.
 
 ### Where it lives
 
