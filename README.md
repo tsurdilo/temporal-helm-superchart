@@ -399,16 +399,6 @@ helm get values temporal-stack -n temporal --all
 helm status temporal-stack -n temporal
 ```
 
-### Port forwarding
-
-```bash
-# Forward a single service to localhost
-kubectl port-forward svc/<service-name> <local-port>:<service-port> -n temporal
-
-# Example: Temporal UI on localhost:8080
-kubectl port-forward svc/temporal-stack-web 8080:8080 -n temporal
-```
-
 ### Cleanup
 
 ```bash
