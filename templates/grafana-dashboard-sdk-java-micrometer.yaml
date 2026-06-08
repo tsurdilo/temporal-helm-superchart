@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard-sdk-java-micrometer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  temporal-sdk-java-micrometer.json: |
+{{ .Files.Get "files/dashboards/temporal-sdk-java-micrometer.json" | indent 4 }}

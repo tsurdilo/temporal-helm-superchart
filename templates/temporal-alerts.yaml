@@ -1,0 +1,322 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-temporal-server-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: {{ .Release.Name }}
+spec:
+  groups:
+    - name: temporal-server-essential
+      interval: 1m
+      rules:
+
+        # ---------------------------------------------------------------------------
+        # Alert 1 — Total RPS Drops to Zero
+        # Runbook: metrics/alerts/server/runbooks/01-total-rps-zero.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalTotalRPSZero
+          expr: sum(rate(service_requests{service_name="frontend"}[5m])) < 1
+          for: 5m
+          labels:
+            severity: critical
+            service: temporal
+            component: frontend
+          annotations:
+            summary: "Temporal: total frontend RPS dropped to zero"
+            description: |
+              Total frontend RPS has dropped to zero. The frontend is up and reporting metrics
+              but receiving no requests — the cluster is unreachable from clients and from other
+              Temporal services. Check frontend pod health and service_errors rate.
+
+        # ---------------------------------------------------------------------------
+        # Alert 1b — Frontend Metrics Absent
+        # Companion to Alert 1 — fires when the series disappears entirely.
+        # Runbook: metrics/alerts/server/runbooks/01b-frontend-metrics-absent.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalFrontendMetricsAbsent
+          expr: absent(rate(service_requests{service_name="frontend"}[5m]))
+          for: 2m
+          labels:
+            severity: critical
+            service: temporal
+            component: frontend
+          annotations:
+            summary: "Temporal: frontend service_requests series is absent"
+            description: |
+              The service_requests metric for the Temporal frontend has stopped being reported
+              entirely. All frontend pods may have crashed or are struggling to the point of not
+              reporting metrics. Alert TemporalTotalRPSZero cannot detect this case.
+              Check frontend pod health and Prometheus scrape targets.
+
+        # ---------------------------------------------------------------------------
+        # Alert 4 — Namespace RPS Drops to Zero
+        # Runbook: metrics/alerts/server/runbooks/04-namespace-rps-zero.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalNamespaceRPSZero
+          expr: |
+            sum by (namespace) (
+              rate(service_requests{service_name="frontend",namespace!="_unknown_"}[5m])
+            ) < 1
+          for: 5m
+          labels:
+            severity: critical
+            service: temporal
+            component: frontend
+          annotations:
+            summary: "Temporal: RPS dropped to zero for namespace {{ "{{" }} $labels.namespace {{ "}}" }}"
+            description: |
+              Namespace {{ "{{" }} $labels.namespace {{ "}}" }} is receiving no frontend requests.
+              Other namespaces may be healthy. Check if TemporalTotalRPSZero is also firing —
+              if so this is cluster-wide. Otherwise check if workers for this namespace are
+              running and connected.
+
+        # ---------------------------------------------------------------------------
+        # Alert 8 — Shard Lock Latency Critical
+        # Runbook: metrics/alerts/server/runbooks/08-shard-lock-latency-critical.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalShardLockLatencyCritical
+          expr: |
+            histogram_quantile(0.99, sum by (le) (
+              rate(semaphore_latency_bucket{operation="ShardInfo",service_name="history"}[5m])
+            )) > 0.3
+          for: 5m
+          labels:
+            severity: critical
+            service: temporal
+            component: history
+          annotations:
+            summary: "Temporal: p99 shard lock latency critical ({{ "{{" }} $value | humanizeDuration {{ "}}" }})"
+            description: |
+              p99 shard lock latency has exceeded 300ms. This can indicate history service issues,
+              elevated DB latencies holding the lock longer, or hot shard conditions from high
+              frequency reuse of the same workflow ID. Check persistence latencies and workflow
+              lock latency for correlation.
+
+        # ---------------------------------------------------------------------------
+        # Alert 12 — Persistence Latency Critical
+        # Runbook: metrics/alerts/server/runbooks/12-persistence-latency-critical.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalPersistenceLatencyCritical
+          expr: |
+            histogram_quantile(0.99, sum by (operation, le) (
+              rate(persistence_latency_bucket{
+                operation=~"CreateWorkflowExecution|UpdateWorkflowExecution|ConflictResolveWorkflowExecution|GetWorkflowExecution|GetCurrentExecution|AppendHistoryNodes|ReadHistoryBranch|CreateTasks|GetTasks|GetTransferTasks|GetTimerTasks|CompleteTransferTask|CompleteTimerTask"
+              }[5m])
+            )) > 1
+          for: 5m
+          labels:
+            severity: critical
+            service: temporal
+            component: persistence
+          annotations:
+            summary: "Temporal: p99 persistence latency critical for {{ "{{" }} $labels.operation {{ "}}" }} ({{ "{{" }} $value | humanizeDuration {{ "}}" }})"
+            description: |
+              p99 persistence latency has exceeded 1s for a critical-path DB operation.
+              Check the Persistence Latencies panel in Grafana to identify which operation is slow.
+
+        # ---------------------------------------------------------------------------
+        # Alert 25 — Service Panic Detected
+        # Runbook: metrics/alerts/server/runbooks/25-service-panic-detected.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalServicePanicDetected
+          expr: sum by (service_name) (rate(service_panics[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            service: temporal
+            component: server
+          annotations:
+            summary: "Temporal: service panic detected in {{ "{{" }} $labels.service_name {{ "}}" }}"
+            description: |
+              A Go panic has been detected in the {{ "{{" }} $labels.service_name {{ "}}" }} service.
+              Check pod logs — the panic stack trace is the primary diagnostic artifact.
+              Search logs for "panic".
+
+        # ---------------------------------------------------------------------------
+        # Alert 27 — Service Error Rate Critical
+        # Runbook: metrics/alerts/server/runbooks/27-service-error-rate-critical.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalServiceErrorRateCritical
+          expr: |
+            sum by (namespace) (
+              rate(service_errors{service_name="frontend",namespace!="_unknown_"}[5m])
+            )
+            /
+            sum by (namespace) (
+              rate(service_requests{service_name="frontend",namespace!="_unknown_"}[5m])
+            ) > 0.3
+          for: 2m
+          labels:
+            severity: critical
+            service: temporal
+            component: frontend
+          annotations:
+            summary: "Temporal: frontend error rate critical for {{ "{{" }} $labels.namespace {{ "}}" }} ({{ "{{" }} $value | humanizePercentage {{ "}}" }})"
+            description: |
+              More than 30% of frontend requests are returning errors for namespace
+              {{ "{{" }} $labels.namespace {{ "}}" }}. Check Service Errors by Namespace and
+              Persistence Latencies panels to identify root cause.
+
+        # ---------------------------------------------------------------------------
+        # Alert 30 — System Overload Throttling
+        # Runbook: metrics/alerts/server/runbooks/30-system-overload-throttling.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalSystemOverloadThrottling
+          expr: |
+            sum(rate(service_errors_resource_exhausted{
+              resource_exhausted_cause=~"RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED|RESOURCE_EXHAUSTED_CAUSE_CIRCUIT_BREAKER_OPEN"
+            }[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            service: temporal
+            component: persistence
+          annotations:
+            summary: "Temporal: system overload or circuit breaker throttling active"
+            description: |
+              Resource exhausted errors with cause SYSTEM_OVERLOADED or CIRCUIT_BREAKER_OPEN
+              are being returned to clients. The cluster is actively shedding load because it
+              cannot keep up. Check Persistence Latencies and Persistence Requests Total panels.
+
+        # ---------------------------------------------------------------------------
+        # Alert 34 — Unexpected Shard Movement
+        # Runbook: metrics/alerts/server/runbooks/34-unexpected-shard-movement.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalUnexpectedShardMovement
+          expr: |
+            (
+              sum(rate(sharditem_created_count{service_name="history"}[5m]))
+              + sum(rate(sharditem_removed_count{service_name="history"}[5m]))
+              + sum(rate(shard_closed_count{service_name="history"}[5m]))
+              > 0
+            )
+            unless
+            (sum(increase(restarts{service_name="history"}[8m])) > 0)
+          for: 10m
+          labels:
+            severity: critical
+            service: temporal
+            component: history
+          annotations:
+            summary: "Temporal: unexpected shard movement without history restarts"
+            description: |
+              Shard creation, removal, or closing detected on the history service without a
+              corresponding restart in the last 8 minutes. Check DB pressure and history pod
+              membership stability.
+
+        # ---------------------------------------------------------------------------
+        # Alert 38 — Timer Task Scheduling Lag Critical
+        # Runbook: metrics/alerts/server/runbooks/38-timer-scheduling-lag-critical.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalTimerSchedulingLagCritical
+          expr: |
+            histogram_quantile(0.99, sum by (operation, le) (
+              rate(shardinfo_scheduled_queue_lag_bucket{task_category="timer",service_name="history"}[5m])
+            )) > 30
+          for: 5m
+          labels:
+            severity: critical
+            service: temporal
+            component: history
+          annotations:
+            summary: "Temporal: timer task scheduling lag critical ({{ "{{" }} $value | humanizeDuration {{ "}}" }} behind)"
+            description: |
+              Timer task scheduling lag has exceeded 30 seconds. Workflow timers, scheduled
+              activities, and workflow timeouts are firing late. Check Persistence Latencies
+              and Shard Lock Latency panels.
+
+        # ---------------------------------------------------------------------------
+        # Alert 57 — All Pollers Disconnected
+        # Runbook: metrics/alerts/server/runbooks/57-all-pollers-disconnected.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalAllPollersDisconnected
+          expr: |
+            sum by (namespace) (
+              service_pending_requests{
+                service_name="frontend",
+                namespace!="_unknown_",
+                operation=~"PollWorkflowTaskQueue|PollActivityTaskQueue"
+              }
+            ) < 1
+          for: 1m
+          labels:
+            severity: critical
+            service: temporal
+            component: frontend
+          annotations:
+            summary: "Temporal: all pollers disconnected for namespace {{ "{{" }} $labels.namespace {{ "}}" }}"
+            description: |
+              No workers are actively polling for workflow or activity tasks in namespace
+              {{ "{{" }} $labels.namespace {{ "}}" }}. Workflows stall at every task boundary.
+              Check worker process health for this namespace.
+
+        # ---------------------------------------------------------------------------
+        # Alert 74 — Matching Partition Sync Throttle Active
+        # Runbook: metrics/alerts/server/runbooks/74-matching-sync-throttle-active.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalMatchingSyncThrottleActive
+          expr: |
+            sum by (namespace, task_type) (
+              rate(sync_throttle_count{service_name="matching",namespace!="_unknown_"}[5m])
+            ) > 0
+          for: 1m
+          labels:
+            severity: critical
+            service: temporal
+            component: matching
+          annotations:
+            summary: "Temporal: matching sync throttle active for {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.task_type {{ "}}" }}"
+            description: |
+              The matching service sync dispatch limit is being hit for namespace
+              {{ "{{" }} $labels.namespace {{ "}}" }}, task type {{ "{{" }} $labels.task_type {{ "}}" }}.
+              If TemporalAllPollersDisconnected is also firing, fix worker provisioning first.
+              Otherwise increase matching.numTaskqueueWritePartitions and
+              matching.numTaskqueueReadPartitions for the affected task queue.
+
+        # ---------------------------------------------------------------------------
+        # Alert 34b — Immediate Queue Lag Critical
+        # Runbook: metrics/alerts/server/runbooks/34b-immediate-queue-lag-critical.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalImmediateQueueLagCritical
+          expr: |
+            histogram_quantile(0.99, sum by (instance, task_category, le) (
+              rate(shardinfo_immediate_queue_lag_bucket{service_name="history"}[11m])
+            )) > 3000000
+          for: 15m
+          labels:
+            severity: critical
+            service: temporal
+            component: history
+          annotations:
+            summary: "Temporal: immediate queue lag critical on {{ "{{" }} $labels.instance {{ "}}" }}/{{ "{{" }} $labels.task_category {{ "}}" }}"
+            description: |
+              The p99 immediate task queue lag on history pod {{ "{{" }} $labels.instance {{ "}}" }}
+              for category {{ "{{" }} $labels.task_category {{ "}}" }} has exceeded 3,000,000 tasks
+              for 15 minutes. A shard on this pod is stuck.
+              1. Check DB Pool Refresh Failure Rate — if non-zero, fix DB first.
+              2. Run: tdbg history-host describe --host-address <pod>
+              3. Run: tdbg shard describe --shard-id <ID>
+              4. Run: tdbg shard close-shard --shard-id <ID>
+              5. If unresolved: restart the history pod.
+
+        # ---------------------------------------------------------------------------
+        # Alert 34f — Shard Deadlock Detected
+        # Runbook: metrics/alerts/server/runbooks/34f-shard-deadlock-detected.md
+        # ---------------------------------------------------------------------------
+        - alert: TemporalShardDeadlockDetected
+          expr: sum by (instance) (dd_current_suspected_deadlocks{service_name="history"}) > 0
+          for: 1m
+          labels:
+            severity: critical
+            service: temporal
+            component: history
+          annotations:
+            summary: "Temporal: shard deadlock detected on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              The deadlock detector has reported suspected deadlock(s) on history pod
+              {{ "{{" }} $labels.instance {{ "}}" }}. A shard's rwLock or ioSemaphore ping timed out.
+              1. Check pod logs for the goroutine dump.
+              2. Restart the history pod — do not rely on tdbg close-shard alone.
+              3. To automate future recovery: set system.deadlock.FailHealthCheck=true in
+                 dynamic config.

@@ -1,0 +1,36 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-namespace-init
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: namespace-init
+          image: temporalio/admin-tools:1.31.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until temporal --address {{ .Release.Name }}-frontend:7233 operator namespace list > /dev/null 2>&1; do
+                echo "Waiting for frontend..."; sleep 3;
+              done
+              temporal --address {{ .Release.Name }}-frontend:7233 operator namespace create -n default \
+                --description "Default namespace" || echo "Namespace already exists, skipping."
+              {{- if .Values.minio.enabled }}
+              temporal --address {{ .Release.Name }}-frontend:7233 operator namespace update default \
+                --history-archival-state enabled \
+                --history-uri "minio://temporal-history/history" \
+                --visibility-archival-state enabled \
+                --visibility-uri "minio://temporal-visibility/visibility" \
+                && echo "Archival enabled on default namespace." \
+                || echo "Warning: could not enable archival on default namespace."
+              {{- end }}
+{{- end }}

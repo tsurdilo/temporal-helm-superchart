@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-dynconfig
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+data:
+  config.yaml: |
+    # Dynamic config for Temporal Server — edit values here to override defaults.
+    # Changes are picked up live without restarting server pods.
+    # Format: each key maps to a list of constrained values.
+    #
+    # Example:
+    #   frontend.namespaceRPS.visibility:
+    #     - value: 100
+    #       constraints: {}

@@ -1,0 +1,26 @@
+{{- if .Values.healthPoller.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-health-poller
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-health-poller
+  template:
+    metadata:
+      labels:
+        app: temporal-health-poller
+    spec:
+      containers:
+        - name: poller
+          image: "{{ .Values.healthPoller.image.repository }}:{{ .Values.healthPoller.image.tag }}"
+          imagePullPolicy: {{ .Values.healthPoller.image.pullPolicy }}
+          env:
+            - name: FRONTEND_ADDR
+              value: {{ .Values.healthPoller.frontendAddr | quote }}
+            - name: POLL_INTERVAL
+              value: {{ .Values.healthPoller.pollInterval | quote }}
+{{- end }}

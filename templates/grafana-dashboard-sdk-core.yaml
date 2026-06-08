@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard-sdk-core
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  temporal-sdk-core.json: |
+{{ .Files.Get "files/dashboards/temporal-sdk-core.json" | indent 4 }}

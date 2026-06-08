@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard-sdk-go
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  temporal-sdk-go.json: |
+{{ .Files.Get "files/dashboards/temporal-sdk-go.json" | indent 4 }}

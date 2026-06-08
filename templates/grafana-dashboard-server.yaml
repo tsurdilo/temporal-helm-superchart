@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard-temporal-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  temporal-server.json: |
+{{ .Files.Get "files/dashboards/temporal-server.json" | indent 4 }}

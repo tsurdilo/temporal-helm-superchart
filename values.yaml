@@ -1,0 +1,275 @@
+  # =============================================================================
+# Temporal Stack — values.yaml
+# =============================================================================
+# All subchart values are namespaced under their chart name.
+# Set <subchart>.enabled: false to disable any component.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PostgreSQL
+# -----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  auth:
+    username: temporal
+    password: temporal
+    database: temporal
+  primary:
+    initdb:
+      scripts:
+        create-visibility-db.sql: |
+          CREATE DATABASE temporal_visibility;
+          GRANT ALL PRIVILEGES ON DATABASE temporal_visibility TO temporal;
+
+# -----------------------------------------------------------------------------
+# Temporal Server
+# -----------------------------------------------------------------------------
+temporal:
+  enabled: true
+
+  server:
+    replicaCount: 1
+
+    image:
+      repository: temporal-custom-server
+      tag: latest
+      pullPolicy: Never
+
+
+    frontend:
+      replicaCount: 2
+      service:
+        type: NodePort
+        port: 7233
+        nodePort: 7233
+
+    history:
+      replicaCount: 2
+
+    matching:
+      replicaCount: 2
+
+    worker:
+      replicaCount: 1
+
+    internal-frontend:
+      enabled: true
+      replicaCount: 1
+
+    metrics:
+      serviceMonitor:
+        enabled: true
+        interval: 30s
+        metricRelabelings:
+          - sourceLabels: [exported_namespace]
+            targetLabel: namespace
+            action: replace
+          - regex: exported_namespace
+            action: labeldrop
+
+    # Dynamic config via ConfigMap (managed by temporal-configmap-dynconfig)
+    dynamicConfig: {}
+
+    archival:
+      history:
+        state: "enabled"
+        enableRead: true
+        provider:
+          customStores:
+            minio:
+              endpoint: "http://temporal-stack-minio:9000"
+              region: "us-east-1"
+              accessKeyID: "minioadmin"
+              secretAccessKey: "minioadmin"
+      visibility:
+        state: "enabled"
+        enableRead: true
+        provider:
+          customStores:
+            minio:
+              endpoint: "http://temporal-stack-minio:9000"
+              region: "us-east-1"
+              accessKeyID: "minioadmin"
+              secretAccessKey: "minioadmin"
+
+    namespaceDefaults:
+      archival:
+        history:
+          state: "enabled"
+          URI: "minio://temporal-history/history"
+        visibility:
+          state: "enabled"
+          URI: "minio://temporal-visibility/visibility"
+
+    config:
+      persistence:
+        defaultStore: default
+        visibilityStore: visibility
+        numHistoryShards: 2048
+        datastores:
+          "default":
+            sql:
+              pluginName: postgres12
+              connectAddr: "temporal-stack-postgresql:5432"
+              connectProtocol: "tcp"
+              databaseName: temporal
+              user: temporal
+              password: temporal
+              maxConns: 20
+              maxIdleConns: 20
+              maxConnLifetime: "1h"
+              manageSchema: true
+          "visibility":
+            sql:
+              pluginName: postgres12
+              connectAddr: "temporal-stack-postgresql:5432"
+              connectProtocol: "tcp"
+              databaseName: temporal_visibility
+              user: temporal
+              password: temporal
+              maxConns: 20
+              maxIdleConns: 20
+              maxConnLifetime: "1h"
+              manageSchema: true
+
+  web:
+    enabled: true
+    replicaCount: 1
+    service:
+      type: NodePort
+      port: 8080
+      nodePort: 30080
+
+  serviceAccount:
+    create: true
+    name: "temporal-stack-server"
+
+  admintools:
+    enabled: true
+
+
+# -----------------------------------------------------------------------------
+# kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
+# -----------------------------------------------------------------------------
+kube-prometheus-stack:
+  enabled: true
+
+  prometheus:
+    service:
+      type: NodePort
+      nodePort: 30090
+    prometheusSpec:
+      # Pick up ServiceMonitors and PrometheusRules from all namespaces
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleNamespaceSelectorNilUsesHelmValues: false
+
+  grafana:
+    enabled: true
+    adminPassword: admin
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+      datasources:
+        enabled: true
+        label: grafana_datasource
+        labelValue: "1"
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        url: http://temporal-stack-loki:3100
+        access: proxy
+        isDefault: false
+    service:
+      type: NodePort
+      port: 80
+      nodePort: 30300
+
+  alertmanager:
+    enabled: true
+
+  nodeExporter:
+    enabled: false
+
+  prometheus-node-exporter:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Loki
+# -----------------------------------------------------------------------------
+loki:
+  enabled: true
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+  singleBinary:
+    replicas: 1
+  # Disable components not needed in single-binary mode
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+  # Disable caches — not needed locally, too memory-hungry
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Promtail
+# -----------------------------------------------------------------------------
+promtail:
+  enabled: true
+  config:
+    clients:
+      - url: http://temporal-stack-loki:3100/loki/api/v1/push
+
+# -----------------------------------------------------------------------------
+# MinIO
+# -----------------------------------------------------------------------------
+minio:
+  enabled: true
+  image: minio/minio:latest
+  rootUser: minioadmin
+  rootPassword: minioadmin
+  buckets:
+    - temporal-history
+    - temporal-visibility
+  consoleNodePort: 30901
+
+# -----------------------------------------------------------------------------
+# Health Poller
+# -----------------------------------------------------------------------------
+healthPoller:
+  enabled: true
+  image:
+    repository: temporal-health-poller
+    tag: latest
+    pullPolicy: Never
+  frontendAddr: "temporal-stack-frontend:7233"
+  pollInterval: "15s"
+
+# -----------------------------------------------------------------------------
+# Global storage class
+# Set to "" to use the cluster default (works on Docker Desktop out of the box)
+# Override for other environments: e.g. "gp2" on AWS, "pd-standard" on GCP
+# -----------------------------------------------------------------------------
+global:
+  storageClass: ""
