@@ -178,7 +178,7 @@ Once installed, the following services are available directly — no port-forwar
 | Temporal UI | [http://localhost:30080](http://localhost:30080) | Workflow management |
 | Grafana | [http://localhost:30300](http://localhost:30300) | Dashboards (admin/admin) |
 | Prometheus | [http://localhost:30090](http://localhost:30090) | Metrics |
-| MinIO Console | [http://localhost:30901](http://localhost:30901) | Archival storage — login: minioadmin / minioadmin |
+| MinIO Console | [http://localhost:30901](http://localhost:30901) | Archival storage — login: minioadmin / minioadmin. History and visibility archival is enabled on the `default` namespace automatically at install time. |
 | Temporal Frontend (gRPC) | `localhost:7233` | SDK target — default port, no config needed. Kubernetes load-balances across both frontend replicas automatically. |
 
 ---

@@ -289,27 +289,29 @@ Apply:
 helm upgrade temporal-stack . --namespace temporal --reuse-values
 ```
 
-**Create a namespace with archival enabled:**
+> The `default` namespace already has archival enabled — the `namespace-init` job configures it automatically at install time. No need to create a separate namespace.
+
+**Verify archival is enabled on the default namespace:**
 ```bash
 kubectl exec -n temporal deployment/temporal-stack-admintools -- \
-  temporal --address temporal-stack-frontend:7233 operator namespace create \
-    --name archival-test \
-    --history-archival-state enabled \
-    --visibility-archival-state enabled
+  temporal --address temporal-stack-frontend:7233 operator namespace describe -n default \
+  | grep -i archival
 ```
+
+You should see `HistoryArchivalState: Enabled` and `VisibilityArchivalState: Enabled`.
 
 **Run a workflow and let it complete:**
 ```bash
 temporal workflow execute \
   --type MyWorkflow \
   --task-queue test \
-  --namespace archival-test
+  --namespace default
 ```
 
 **Verify the workflow was archived:**
 ```bash
 temporal workflow list \
-  --namespace archival-test \
+  --namespace default \
   --archived
 ```
 
