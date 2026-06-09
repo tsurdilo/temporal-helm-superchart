@@ -48,6 +48,7 @@ Everything is pre-wired. No manual configuration required to get started.
 - [Updating dashboards](#updating-dashboards)
 - [Dynamic config](#dynamic-config)
 - [MinIO and Archival](#minio-and-archival)
+- [Scaling Temporal Services](#scaling-temporal-services)
 - [Useful Kubernetes commands](#useful-kubernetes-commands)
 - [Troubleshooting](#troubleshooting)
 - [Upgrading Temporal Server](#upgrading-temporal-server)
@@ -382,6 +383,63 @@ temporal:
 ```
 
 For a local dev setup, Option 1 is the right default. Option 2 is useful when running multiple clusters and you want a single place to browse all archived workflows.
+
+---
+
+## Scaling Temporal Services
+
+The chart defaults are sized for local development (frontend ×2, history ×2, matching ×2, worker ×1). You can scale any service by updating `values.yaml` and running `helm upgrade`.
+
+### Scale via values.yaml (persistent)
+
+Edit `values.yaml` and change the replica counts:
+
+```yaml
+temporal:
+  server:
+    frontend:
+      replicaCount: 3
+    history:
+      replicaCount: 5
+    matching:
+      replicaCount: 3
+    worker:
+      replicaCount: 2
+```
+
+Then apply:
+
+```bash
+helm upgrade temporal-stack . --namespace temporal --reuse-values
+```
+
+### Scale via kubectl (temporary)
+
+For a quick one-off change without touching `values.yaml` — note this will be overwritten on the next `helm upgrade`:
+
+```bash
+kubectl scale deployment temporal-stack-frontend  -n temporal --replicas=3
+kubectl scale deployment temporal-stack-history   -n temporal --replicas=5
+kubectl scale deployment temporal-stack-matching  -n temporal --replicas=3
+kubectl scale deployment temporal-stack-worker    -n temporal --replicas=2
+```
+
+
+### Verifying a scale-out
+
+After scaling, confirm the new pods are running and healthy:
+
+```bash
+kubectl get pods -n temporal | grep frontend
+```
+
+Expected: all pods showing `1/1 Running`. The membership ring discovers new pods automatically — no manual registration needed. You can confirm ring discovery happened by checking the logs for a `Quota changed` message, which fires when the per-host RPS quota redistributes across the new pod count:
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-frontend --tail=20 | grep "Quota changed"
+```
+
+> **Note:** The `temporal` CLI does not expose ring membership directly. `Quota changed` in the logs is the clearest signal that the new pod joined the ring successfully.
 
 ---
 
