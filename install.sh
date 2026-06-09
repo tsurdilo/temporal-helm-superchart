@@ -30,9 +30,10 @@ docker image inspect temporal-custom-server:latest &>/dev/null || MISSING=true
 docker image inspect temporal-health-poller:latest &>/dev/null || MISSING=true
 if [[ "$MISSING" == "true" ]]; then
   echo "  Images not found — building now (this takes a few minutes)..."
-  APP_VERSION="$(grep 'appVersion' "$(dirname "$0")/Chart.yaml" | awk '{print $2}' | tr -d '"')"
-  [[ "$APP_VERSION" != v* ]] && APP_VERSION="v${APP_VERSION}"
-  bash "$(dirname "$0")/build.sh" --server-version "$APP_VERSION"
+  BUILD_VERSION="$(grep 'appVersion' "$(dirname "$0")/Chart.yaml" | awk '{print $2}' | tr -d '"')"
+  [[ "$BUILD_VERSION" != v* ]] && BUILD_VERSION="v${BUILD_VERSION}"
+  echo "  Building server version: $BUILD_VERSION (set appVersion in Chart.yaml to change)"
+  bash "$(dirname "$0")/build.sh" --server-version "$BUILD_VERSION"
 else
   echo "  Images found — skipping build."
 fi

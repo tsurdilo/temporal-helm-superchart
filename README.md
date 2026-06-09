@@ -124,7 +124,9 @@ The chart uses two locally-built images:
 - **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in, enabling live dynamic config reloads from the Kubernetes ConfigMap.
 - **`temporal-health-poller`** — Calls `AdminHandler.DeepHealthCheck` on each history pod and emits the `host_health` gauge to Prometheus.
 
-Images are built from `~/devel/temporal/temporal` at the tag matching `appVersion` in `Chart.yaml` and cached in Docker Desktop — no registry push needed. To rebuild manually (e.g. after a version change):
+The server version is controlled by `appVersion` in `Chart.yaml` — that is the single source of truth. `install.sh` reads it automatically when building images. To target a different version, update `appVersion` in `Chart.yaml` first, then run `install.sh`.
+
+Images are built from `~/devel/temporal/temporal` at the tag matching `appVersion` and cached in Docker Desktop — no registry push needed. To rebuild manually (e.g. after a version change):
 
 ```bash
 bash build.sh --server-version v1.31.0
