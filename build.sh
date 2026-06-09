@@ -28,6 +28,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Clone server repo if not present
+if [[ ! -d "$SERVER_DIR/.git" ]]; then
+  echo "==> Cloning Temporal server repository (one-time setup)..."
+  git clone https://github.com/temporalio/temporal "$SERVER_DIR"
+fi
+
 # Optionally check out a specific server release tag
 if [[ -n "$SERVER_VERSION" ]]; then
   echo "==> Checking out Temporal server $SERVER_VERSION"

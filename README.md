@@ -38,7 +38,6 @@ Everything is pre-wired. No manual configuration required to get started.
   - [3. kubectl](#3-kubectl)
   - [4. Helm](#4-helm)
 - [Installing the chart](#installing-the-chart)
-  - [Clone the Temporal server](#clone-the-temporal-server)
   - [Custom images](#custom-images)
   - [Run the install script](#run-the-install-script)
   - [Verify](#verify)
@@ -115,16 +114,6 @@ helm version
 ---
 
 ## Installing the chart
-
-### Clone the Temporal server
-
-`build.sh` checks out the requested server tag from a local clone. If you don't have it yet:
-
-```bash
-git clone https://github.com/temporalio/temporal ~/devel/temporal/temporal
-```
-
-This is a one-time step — the clone is reused for every subsequent build.
 
 ### Custom images
 
