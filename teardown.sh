@@ -8,7 +8,7 @@
 #   - temporal-custom-server and temporal-health-poller Docker images
 #
 # Usage:
-#   bash teardown.sh           # removes everything including Docker images
+#   bash teardown.sh                 # removes everything including Docker images
 #   bash teardown.sh --keep-images   # skip Docker image removal
 
 set -e
@@ -16,45 +16,63 @@ set -e
 NAMESPACE=${NAMESPACE:-temporal}
 RELEASE=${RELEASE:-temporal-stack}
 KEEP_IMAGES=false
+TOTAL_STEPS=4
 
 for arg in "$@"; do
   case $arg in
-    --keep-images) KEEP_IMAGES=true ;;
+    --keep-images) KEEP_IMAGES=true; TOTAL_STEPS=3 ;;
   esac
 done
 
-echo "==> Uninstalling Helm release '$RELEASE' from namespace '$NAMESPACE'..."
+step() {
+  echo ""
+  echo "──────────────────────────────────────────────"
+  echo "  Step $1 of $TOTAL_STEPS — $2"
+  echo "──────────────────────────────────────────────"
+}
+
+# ── Step 1 ─────────────────────────────────────────
+step 1 "Uninstalling Helm release"
 helm uninstall "$RELEASE" --namespace "$NAMESPACE" 2>/dev/null \
-  && echo "    Release removed." \
-  || echo "    Release not found (already gone)."
+  && echo "  Release removed." \
+  || echo "  Release not found (already gone)."
 
-echo "==> Deleting temporal-dynconfig ConfigMap (resource-policy: keep)..."
+# ── Step 2 ─────────────────────────────────────────
+step 2 "Deleting dynconfig ConfigMap"
+echo "  (This ConfigMap is excluded from helm uninstall by resource-policy: keep)"
 kubectl delete configmap temporal-dynconfig -n "$NAMESPACE" 2>/dev/null \
-  && echo "    ConfigMap deleted." \
-  || echo "    ConfigMap not found (already gone)."
+  && echo "  ConfigMap deleted." \
+  || echo "  ConfigMap not found (already gone)."
 
-echo "==> Deleting namespace '$NAMESPACE'..."
+# ── Step 3 ─────────────────────────────────────────
+step 3 "Deleting namespace '$NAMESPACE'"
+echo "  (This removes all remaining resources and PersistentVolumes)"
 kubectl delete namespace "$NAMESPACE" 2>/dev/null \
-  && echo "    Waiting for namespace to be fully gone..." \
-  || echo "    Namespace not found (already gone)."
+  && echo "  Namespace deletion in progress..." \
+  || echo "  Namespace not found (already gone)."
+echo "  Waiting for namespace to be fully gone..."
 until ! kubectl get namespace "$NAMESPACE" &>/dev/null; do sleep 2; done
-echo "    Namespace gone."
+echo "  Namespace gone."
 
+# ── Step 4 ─────────────────────────────────────────
 if [[ "$KEEP_IMAGES" == "false" ]]; then
-  echo "==> Removing Docker images..."
+  step 4 "Removing Docker images"
   docker rmi temporal-custom-server:latest 2>/dev/null \
-    && echo "    temporal-custom-server removed." \
-    || echo "    temporal-custom-server not found (already gone)."
+    && echo "  temporal-custom-server removed." \
+    || echo "  temporal-custom-server not found (already gone)."
   docker rmi temporal-health-poller:latest 2>/dev/null \
-    && echo "    temporal-health-poller removed." \
-    || echo "    temporal-health-poller not found (already gone)."
+    && echo "  temporal-health-poller removed." \
+    || echo "  temporal-health-poller not found (already gone)."
 else
-  echo "==> Skipping Docker image removal (--keep-images)."
+  echo ""
+  echo "  Skipping Docker image removal (--keep-images)."
 fi
 
 echo ""
-echo "==> Teardown complete."
+echo "══════════════════════════════════════════════"
+echo "  Teardown complete! (all $TOTAL_STEPS steps passed)"
+echo "══════════════════════════════════════════════"
 echo ""
-echo "To do a fresh install from scratch:"
-echo "  bash build.sh --server-version v1.31.0"
-echo "  bash install.sh"
+echo "  To reinstall:"
+echo "    bash install.sh"
+echo ""

@@ -9,12 +9,8 @@ This document covers what to test, how to test it, and what to look for at each 
 Validate that `install.sh` produces a fully running cluster from scratch every time.
 
 ```bash
-# Tear down completely
-helm uninstall temporal-stack --namespace temporal
-# Note: you will see "These resources were kept due to the resource policy: [ConfigMap] temporal-dynconfig"
-# That is expected — the namespace deletion below removes it.
-
-kubectl delete namespace temporal
+# Tear down completely (removes Helm release, dynconfig ConfigMap, namespace, and Docker images)
+bash teardown.sh
 ```
 
 Verify it is fully gone before proceeding:
@@ -28,10 +24,7 @@ kubectl get pv | grep temporal
 ```
 
 ```bash
-# Build images against the target server version (run from repo root)
-bash build.sh --server-version v1.31.0
-
-# Fresh install
+# Fresh install — automatically builds images if missing, adds Helm repos, installs full stack
 bash install.sh
 ```
 
@@ -228,7 +221,16 @@ kubectl logs -n temporal deployment/temporal-stack-frontend --since=30s | grep -
 
 **Revert — remove the namespacerps override:**
 
-Use `kubectl edit configmap temporal-dynconfig -n temporal` and delete the `frontend.namespacerps` block, leaving the rest of the keys intact. Save and exit.
+Get the current config, remove the `frontend.namespacerps` block, and re-apply:
+
+```bash
+kubectl get configmap temporal-dynconfig -n temporal -o jsonpath='{.data.config\.yaml}' > /tmp/dynconfig.yaml
+# Edit /tmp/dynconfig.yaml — delete the frontend.namespacerps lines
+kubectl create configmap temporal-dynconfig \
+  --from-file=config.yaml=/tmp/dynconfig.yaml \
+  --namespace temporal \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
 
 Wait a few seconds, then verify workflows start again:
 ```bash
@@ -268,26 +270,7 @@ Expected: one time series per history pod, each with value `1` (SERVING).
 
 ## Phase 7 — MinIO Archival (when enabled)
 
-> MinIO and archival are enabled by default. If you previously disabled them, re-enable with the values below.
-
-**Ensure MinIO is enabled in `values.yaml`:**
-
-```yaml
-minio:
-  enabled: true
-  rootUser: minioadmin
-  rootPassword: minioadmin
-  buckets:
-    - temporal-history
-    - temporal-visibility
-```
-
-The archival and namespaceDefaults sections are already present in `values.yaml` — no further edits needed.
-
-Apply:
-```bash
-helm upgrade temporal-stack . --namespace temporal --reuse-values
-```
+> MinIO and archival are enabled by default and the `default` namespace is pre-configured for archival at install time — no extra steps needed.
 
 > The `default` namespace already has archival enabled — the `namespace-init` job configures it automatically at install time. No need to create a separate namespace.
 

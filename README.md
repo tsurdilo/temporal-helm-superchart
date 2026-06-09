@@ -1,6 +1,20 @@
 # Temporal Stack — Helm Super-Chart
 
-A self-contained Helm chart that deploys a full Temporal Server cluster on Kubernetes, including:
+## Why this exists
+
+The [official Temporal Helm chart](https://github.com/temporalio/helm-charts) deploys only the Temporal server components — frontend, history, matching, and worker. It intentionally does not include a database, observability stack, or archival storage. The chart's own documentation explicitly states that any bundled versions of those components are not production-grade and that users are expected to bring their own.
+
+In practice, this means every team using the Temporal Helm chart has to wire up the same set of surrounding infrastructure themselves:
+
+- A PostgreSQL or Cassandra instance for persistence
+- Prometheus and Grafana for metrics and dashboards
+- A log aggregation stack (Loki + Promtail)
+- An object store for workflow archival (S3, MinIO, GCS)
+- A way to manage Temporal's dynamic config in Kubernetes
+
+This chart — a Helm "super-chart" or umbrella chart — does all of that. It wraps the upstream Temporal chart as a subchart and adds all the surrounding infrastructure as properly integrated dependencies, pre-wired and production-oriented. The goal is to give you a complete, realistic starting point rather than a minimal skeleton you have to extend yourself.
+
+## What's included
 
 - Temporal Server (frontend ×2, history ×2, matching ×2, worker ×1, internal-frontend ×1)
 - PostgreSQL (main store + visibility store)
@@ -8,6 +22,7 @@ A self-contained Helm chart that deploys a full Temporal Server cluster on Kuber
 - Loki + Promtail (log aggregation)
 - MinIO (workflow and visibility archival)
 - Health poller (drives per-host `host_health` metrics)
+- ConfigMap-based dynamic config with live reload (no pod restarts required)
 
 Everything is pre-wired. No manual configuration required to get started.
 
@@ -23,16 +38,16 @@ Everything is pre-wired. No manual configuration required to get started.
   - [3. kubectl](#3-kubectl)
   - [4. Helm](#4-helm)
 - [Installing the chart](#installing-the-chart)
-  - [Add required Helm repositories](#add-required-helm-repositories)
-  - [Build the custom images](#build-the-custom-images)
+  - [Clone the Temporal server](#clone-the-temporal-server)
+  - [Custom images](#custom-images)
   - [Run the install script](#run-the-install-script)
   - [Verify](#verify)
 - [Accessing the services](#accessing-the-services)
-- [Uninstalling](#uninstalling)
-- [Starting fresh](#starting-fresh)
+- [Uninstalling / Starting Fresh](#uninstalling--starting-fresh)
 - [Switching between this chart and Docker Compose](#switching-between-this-chart-and-docker-compose)
 - [Updating dashboards](#updating-dashboards)
 - [Dynamic config](#dynamic-config)
+- [MinIO and Archival](#minio-and-archival)
 - [Useful Kubernetes commands](#useful-kubernetes-commands)
 - [Troubleshooting](#troubleshooting)
 - [Upgrading Temporal Server](#upgrading-temporal-server)
@@ -70,11 +85,7 @@ This chart runs on a local Kubernetes cluster provided by Docker Desktop.
 
 ### 3. kubectl
 
-kubectl is the Kubernetes command-line tool. Install it with:
-
-```bash
-brew install kubectl
-```
+Docker Desktop installs `kubectl` automatically and sets the `docker-desktop` context — no separate installation needed.
 
 Verify it is pointed at your local cluster:
 
@@ -88,13 +99,13 @@ kubectl get nodes
 
 ### 4. Helm
 
-Helm is the Kubernetes package manager used to install this chart.
+Helm is the Kubernetes package manager used to install this chart. Docker Desktop does not bundle it — install separately:
 
 ```bash
 brew install helm
 ```
 
-Verify:
+Verify (v3+ required):
 
 ```bash
 helm version
@@ -104,36 +115,32 @@ helm version
 
 ## Installing the chart
 
-### Add required Helm repositories
+### Clone the Temporal server
+
+`build.sh` checks out the requested server tag from a local clone. If you don't have it yet:
 
 ```bash
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo add temporal https://go.temporal.io/helm-charts
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
+git clone https://github.com/temporalio/temporal ~/devel/temporal/temporal
 ```
 
-### Build the custom images
+This is a one-time step — the clone is reused for every subsequent build.
 
-The chart uses two locally-built Docker images. Build them before installing:
+### Custom images
+
+`install.sh` checks for the custom images automatically and builds them if they are missing — no manual build step required on a fresh setup.
+
+The chart uses two locally-built images:
+
+- **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in, enabling live dynamic config reloads from the Kubernetes ConfigMap.
+- **`temporal-health-poller`** — Calls `AdminHandler.DeepHealthCheck` on each history pod and emits the `host_health` gauge to Prometheus.
+
+Images are built from `~/devel/temporal/temporal` at the tag matching `appVersion` in `Chart.yaml` and cached in Docker Desktop — no registry push needed. To rebuild manually (e.g. after a version change):
 
 ```bash
-# from the repo root — always specify the server version to match Chart.yaml
 bash build.sh --server-version v1.31.0
 ```
 
-This checks out that tag in `~/devel/temporal/temporal`, aligns the `go.temporal.io/api` version across all modules, then builds two images into Docker Desktop's image cache (no registry push needed):
-
-- **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in. This is what enables live dynamic config reloads from the Kubernetes ConfigMap.
-- **`temporal-health-poller`** — Sidecar that calls `AdminHandler.DeepHealthCheck` on each history pod and emits the `host_health` gauge to Prometheus.
-
-The script prints the server tag and commit it built against so you always know what is in the image:
-```
-==> Building against server: v1.31.0 (83881961d)
-```
-
-The version passed to `--server-version` must match the Temporal chart version in `Chart.yaml`. See [UPGRADE.md](UPGRADE.md) when changing versions.
+> See [UPGRADE.md](UPGRADE.md) when changing server versions.
 
 ### Run the install script
 
@@ -143,11 +150,12 @@ bash install.sh
 ```
 
 The script handles everything in the correct order:
-1. Installs Prometheus Operator CRDs
-2. Installs PostgreSQL and waits for it to be fully ready
-3. Installs the full stack
-4. Waits for Temporal frontend, worker, and Grafana to be ready
-5. Creates the `default` Temporal namespace automatically
+1. Adds and updates all required Helm repositories
+2. Installs Prometheus Operator CRDs (required before kube-prometheus-stack)
+3. Installs PostgreSQL and waits for it to be fully ready and reachable from within the cluster
+4. Installs the full stack
+5. Waits for Temporal frontend, worker, and Grafana to be ready
+6. Creates the `default` Temporal namespace with archival enabled automatically
 
 The first install takes 5–10 minutes as images are pulled. You will see output like:
 
@@ -157,6 +165,7 @@ The first install takes 5–10 minutes as images are pulled. You will see output
   Temporal UI:  http://localhost:30080
   Grafana:      http://localhost:30300  (admin/admin)
   Prometheus:   http://localhost:30090
+  MinIO:        http://localhost:30901  (minioadmin/minioadmin)
 ```
 
 ### Verify
@@ -187,9 +196,9 @@ Once installed, the following services are available directly — no port-forwar
 
 Use `teardown.sh` to completely remove the running cluster. It handles the `helm.sh/resource-policy: keep` ConfigMap, the namespace, and optionally the Docker images — all in one step.
 
-**Teardown + reinstall (keep existing images):**
+**Teardown + reinstall (reuse existing images):**
 ```bash
-bash teardown.sh
+bash teardown.sh --keep-images
 bash install.sh
 ```
 
@@ -200,10 +209,7 @@ bash build.sh --server-version v1.31.0
 bash install.sh
 ```
 
-**Teardown only (keep images in Docker cache):**
-```bash
-bash teardown.sh --keep-images
-```
+> By default `teardown.sh` removes the custom Docker images. Always use `--keep-images` if you plan to reinstall without rebuilding, otherwise `install.sh` will fail with `ErrImageNeverPull`.
 
 > The `temporal-dynconfig` ConfigMap has `helm.sh/resource-policy: keep`, so `helm uninstall` alone does not remove it. `teardown.sh` deletes it explicitly before removing the namespace.
 
@@ -211,36 +217,35 @@ bash teardown.sh --keep-images
 
 ## Switching between this chart and Docker Compose
 
-If you are running Temporal via Docker Compose instead of Kubernetes, see [my-temporal-dockercompose](https://github.com/tsurdilo/my-temporal-dockercompose) — a companion repo covering Docker Compose and Swarm deployments with the same production-oriented configuration.
+See [my-temporal-dockercompose](https://github.com/tsurdilo/my-temporal-dockercompose) for the companion Docker Compose setup.
 
-You can switch freely between running Temporal on Kubernetes (this chart) and running it via Docker Compose. They are completely independent — Kubernetes does not interfere with Docker containers.
-
-> **Important:** Both setups use port 7233 for the Temporal frontend. You cannot run both at the same time.
+**You cannot run both at the same time.** Both setups bind port `7233` on localhost for the Temporal frontend — whichever starts second will fail to bind.
 
 ### Switch from K8s to Docker Compose
 
 ```bash
-# 1. Uninstall the chart
-helm uninstall temporal-stack --namespace temporal
+# 1. Tear down the K8s stack (keep images so you can switch back without rebuilding)
+cd ~/devel/temporal-helm-superchart
+bash teardown.sh --keep-images
 
-# 2. Start the Docker Compose cluster (from your compose repo)
-cd ~/path/to/my-temporal-dockercompose
-docker compose up -d
+# 2. Start Docker Compose
+cd ~/devel/my-temporal-dockercompose
+docker compose -f compose-postgres.yml -f compose-services.yml up -d
 ```
 
 ### Switch from Docker Compose back to K8s
 
 ```bash
-# 1. Stop the Docker Compose cluster
-cd ~/path/to/my-temporal-dockercompose
-docker compose down
+# 1. Stop Docker Compose
+cd ~/devel/my-temporal-dockercompose
+docker compose -f compose-postgres.yml -f compose-services.yml down
 
-# 2. Reinstall the chart
-cd ~/path/to/temporal-helm-superchart
+# 2. Reinstall the K8s stack
+cd ~/devel/temporal-helm-superchart
 bash install.sh
 ```
 
-Your Kubernetes cluster keeps running in the background while Docker Compose is active — you do not need to stop or restart it.
+The Kubernetes cluster itself keeps running in the background while Docker Compose is active — you only need to tear down the Helm release, not the cluster.
 
 ---
 
@@ -261,73 +266,122 @@ Grafana picks up the change automatically — no restart required.
 
 ## Dynamic config
 
-Temporal's [dynamic config](https://docs.temporal.io/references/dynamic-configuration) controls hundreds of runtime parameters — rate limits, cache sizes, task queue partitions, retention policies, and more. This chart uses a Kubernetes ConfigMap as the dynamic config backend, powered by [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) — a custom dynamic config client that watches the ConfigMap via the Kubernetes Watch API and applies changes to the server live, with no pod restarts required.
+### What it is
 
-### Where it lives
+Temporal has hundreds of runtime parameters — rate limits, cache sizes, task queue settings, retention policies — that can be changed without restarting the server. These are called [dynamic config](https://docs.temporal.io/references/dynamic-configuration).
+
+In a standard Temporal deployment you manage these via a config file on disk, which means SSHing into servers or redeploying to make a change. This chart replaces that with a **Kubernetes ConfigMap** — a key-value store that lives inside the cluster. The custom server image has [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in, which watches the ConfigMap for changes using the Kubernetes Watch API. The moment you update the ConfigMap, all server pods see the change within seconds — no restart, no redeploy.
+
+### Viewing the current config
 
 ```bash
 kubectl get configmap temporal-dynconfig -n temporal -o jsonpath='{.data.config\.yaml}'
 ```
 
-On a fresh install the ConfigMap contains seeded defaults. Any key not present falls back to Temporal's compiled-in default.
+On a fresh install the ConfigMap is mostly empty — any key not explicitly set falls back to Temporal's compiled-in default.
 
 ### Making a change
 
-Edit the ConfigMap directly:
+Create a YAML file with the keys you want to set, then apply it:
 
 ```bash
-kubectl edit configmap temporal-dynconfig -n temporal
-```
-
-This opens the ConfigMap in your default editor (`$EDITOR`). Edit the `config.yaml` value under `data:`, save, and close. All server pods pick up the change within seconds — no restart required.
-
-Example — raise the visibility list RPS (defaults to 10, a common source of `RESOURCE_EXHAUSTED` errors):
-
-```yaml
-data:
-  config.yaml: |
-    frontend.namespaceRPS.visibility:
-      - value: 100
-        constraints: {}
-```
-
-### Value format
-
-Each key maps to a list of constrained values. A value with `constraints: {}` is the global default. You can add per-namespace overrides above it:
-
-```yaml
-frontend.globalNamespaceRPS:
-  - value: 500
-    constraints:
-      namespace: high-traffic-namespace
-  - value: 1200
+# 1. Create a file with your changes (or edit an existing one)
+cat > my-dynconfig.yaml << 'EOF'
+frontend.namespaceRPS.visibility:
+  - value: 100
     constraints: {}
-```
+EOF
 
-Temporal evaluates constraints in order — most specific wins.
-
-### Applying a file
-
-If you prefer to keep your dynamic config in a file under version control:
-
-```bash
+# 2. Apply it to the ConfigMap
 kubectl create configmap temporal-dynconfig \
   --from-file=config.yaml=my-dynconfig.yaml \
   --namespace temporal \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-### Reverting a value to the compiled-in default
+All server pods pick up the change within seconds. No restart required.
 
-Remove the key from `config.yaml`. All pods revert to Temporal's compiled-in default within seconds.
+### Value format
 
-### Viewing what is currently loaded
+Each key is a list of values with optional constraints. A value with `constraints: {}` is the global default. You can add per-namespace overrides:
 
-```bash
-kubectl get configmap temporal-dynconfig -n temporal -o jsonpath='{.data.config\.yaml}'
+```yaml
+frontend.globalNamespaceRPS:
+  - value: 500
+    constraints:
+      namespace: my-high-traffic-namespace   # applies only to this namespace
+  - value: 1200
+    constraints: {}                           # global fallback for all other namespaces
 ```
 
-To see Temporal's compiled-in defaults for any key, check the [dynamic config reference](https://github.com/temporalio/temporal/blob/main/service/config/development-cass.yaml) in the Temporal server source.
+Temporal evaluates constraints top-to-bottom — most specific wins.
+
+### Reverting a value
+
+Remove the key from your YAML file and re-apply. The server falls back to its compiled-in default within seconds.
+
+### Using with multiple clusters
+
+Each ConfigMap is scoped to a Kubernetes namespace. If you run two separate Temporal clusters in two namespaces (e.g. `temporal-a` and `temporal-b`), each has its own `temporal-dynconfig` ConfigMap and its own independent set of dynamic config values — changes to one cluster do not affect the other.
+
+There is no native Kubernetes mechanism to share a ConfigMap across namespaces — a pod in `temporal-a` cannot watch a ConfigMap in `temporal-b`. The recommended approach is to keep a single source-of-truth YAML file under version control and apply it to each namespace when you want to sync:
+
+```bash
+kubectl create configmap temporal-dynconfig \
+  --from-file=config.yaml=my-dynconfig.yaml \
+  --namespace temporal-a \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap temporal-dynconfig \
+  --from-file=config.yaml=my-dynconfig.yaml \
+  --namespace temporal-b \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+This keeps config changes auditable and consistent without adding extra tooling.
+
+### Reference
+
+To see all available keys and their compiled-in defaults, check the [dynamic config reference](https://github.com/tsurdilo/temporal-server-operations/tree/main/dynamic_config).
+
+---
+
+## MinIO and Archival
+
+MinIO is deployed as a pod inside the `temporal` namespace and is used as the archival backend for workflow history and visibility. The `default` Temporal namespace has archival enabled automatically at install time — no manual setup required.
+
+The MinIO console is available at [http://localhost:30901](http://localhost:30901) (login: `minioadmin` / `minioadmin`). Archived workflow files appear in the `temporal-history` and `temporal-visibility` buckets.
+
+### Using with multiple clusters
+
+MinIO is namespace-scoped — it is only directly accessible to services in the `temporal` namespace. If you run a second Temporal cluster in a different namespace (e.g. `temporal-b`), its pods cannot reach this MinIO instance by default.
+
+You have two options:
+
+**Option 1 — Separate MinIO per cluster (default, simplest)**
+Each cluster gets its own MinIO deployed in its own namespace. Fully isolated, no cross-namespace dependencies. This is what this chart does out of the box.
+
+**Option 2 — Shared MinIO across clusters**
+Deploy MinIO once in a dedicated namespace (e.g. `minio`) and point each Temporal cluster at it using the full Kubernetes DNS name:
+
+```
+http://temporal-stack-minio.minio.svc.cluster.local:9000
+```
+
+Each cluster uses different bucket names (e.g. `cluster-a-history`, `cluster-b-history`) to keep archived data separate. Update `values.yaml` on each cluster to point at the shared endpoint:
+
+```yaml
+temporal:
+  server:
+    archival:
+      history:
+        provider:
+          customStores:
+            minio:
+              endpoint: "http://temporal-stack-minio.minio.svc.cluster.local:9000"
+```
+
+For a local dev setup, Option 1 is the right default. Option 2 is useful when running multiple clusters and you want a single place to browse all archived workflows.
 
 ---
 
@@ -401,13 +455,7 @@ helm status temporal-stack -n temporal
 
 ### Cleanup
 
-```bash
-# Delete everything in the temporal namespace (data included)
-kubectl delete namespace temporal
-
-# Recreate it fresh
-kubectl create namespace temporal
-```
+For a full teardown use `teardown.sh` — it handles the dynconfig ConfigMap and images correctly. See [Uninstalling / Starting Fresh](#uninstalling--starting-fresh).
 
 ---
 
@@ -420,10 +468,9 @@ kubectl describe pod <pod-name> -n temporal
 Usually a resource constraint or PVC not binding. Check that your Docker Desktop has enough memory allocated.
 
 **Images not found:**
-Make sure you built the custom images before installing — Docker Desktop shares its image cache with Kubernetes automatically:
+Build the custom images using `build.sh` — do not use `docker build` directly, as `build.sh` handles the server checkout and go.mod alignment:
 ```bash
-docker build -t temporal-custom-server:latest -f images/server/Dockerfile .
-docker build -t temporal-health-poller:latest -f images/poller/Dockerfile .
+bash build.sh --server-version v1.31.0
 ```
 
 **Port already in use:**

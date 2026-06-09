@@ -1,5 +1,22 @@
 # Upgrading Temporal Server
 
+## Why upgrades require manual steps
+
+The upstream Temporal Helm chart does not handle schema migrations. When you run `helm upgrade` with a new server version it simply rolls out pods with the new binary — if the database schema is behind what that binary expects, the pods will refuse to start with:
+
+```
+sql schema version compatibility check failed: version mismatch for keyspace/database: "temporal"
+```
+
+Schema migrations are always the operator's responsibility. The correct upgrade order is:
+
+1. **Migrate the schema first** (against both `temporal` and `temporal_visibility` databases)
+2. **Then upgrade the binary** (`helm upgrade`)
+
+Never reverse this order.
+
+---
+
 This runbook covers upgrading the Temporal Server version in this Helm chart. The chart runs PostgreSQL for both the main and visibility stores, so every upgrade involves two steps before touching the binary: schema migration on `temporal` and schema migration on `temporal_visibility`.
 
 > **Schema must be updated before any new server binary starts.** A server instance that finds its schema behind what the binary expects will refuse to start. Complete Steps 1 and 2 fully before Step 3.
@@ -134,17 +151,18 @@ helm dependency update .
 Before applying the new chart, set two dynamic config values to give history shards a clean handoff window during the rolling update:
 
 ```bash
-kubectl edit configmap temporal-dynconfig -n temporal
-```
-
-Add to `config.yaml`:
-```yaml
+kubectl create configmap temporal-dynconfig \
+  --from-literal=config.yaml="$(kubectl get configmap temporal-dynconfig -n temporal \
+    -o jsonpath='{.data.config\.yaml}')
 history.shutdownDrainDuration:
   - value: 10s
     constraints: {}
 history.startupMembershipJoinDelay:
   - value: 10s
     constraints: {}
+" \
+  --namespace temporal \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ### 3e. Apply the chart upgrade
@@ -190,10 +208,18 @@ If you see this, the schema migration did not fully apply. Re-run Steps 1 and 2.
 
 **Reset drain window config:**
 
-Once all pods are healthy, remove or zero out the drain config values added in Step 3d:
+Once all pods are healthy, remove the drain config values added in Step 3d:
 ```bash
-kubectl edit configmap temporal-dynconfig -n temporal
-# Remove or set both history.shutdownDrainDuration and history.startupMembershipJoinDelay to 0s
+kubectl get configmap temporal-dynconfig -n temporal -o json \
+  | python3 -c "
+import sys, json, re
+cm = json.load(sys.stdin)
+yaml = cm['data'].get('config.yaml', '')
+yaml = re.sub(r'history\.shutdownDrainDuration:.*?constraints: \{\}\n', '', yaml, flags=re.DOTALL)
+yaml = re.sub(r'history\.startupMembershipJoinDelay:.*?constraints: \{\}\n', '', yaml, flags=re.DOTALL)
+cm['data']['config.yaml'] = yaml
+print(json.dumps(cm))
+" | kubectl apply -f - >/dev/null
 ```
 
 ---
@@ -275,7 +301,7 @@ This walks through the complete upgrade from a fresh v1.30.0 install to v1.31.0,
 - B5: Sets the drain window in dynconfig
 - B6: Runs `helm upgrade` and waits for all deployments to roll out
 - B7: Verifies the cluster is running at v1.31.0
-- B8: Opens `kubectl edit` to remove the drain window config
+- B8: Removes the drain window keys from the dynconfig ConfigMap programmatically
 
 ---
 
