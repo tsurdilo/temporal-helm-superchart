@@ -418,19 +418,19 @@ kubectl scale deployment temporal-stack-worker    -n temporal --replicas=2
 
 ### Verifying a scale-out
 
-After scaling, confirm the new pods are running and healthy:
+After scaling, confirm the new pods are running and that the membership ring picked them up:
 
 ```bash
-kubectl get pods -n temporal | grep frontend
+kubectl exec -n temporal deployment/temporal-stack-admintools -- \
+  tdbg --address temporal-stack-frontend:7233 membership list-gossip
 ```
 
-Expected: all pods showing `1/1 Running`. The membership ring discovers new pods automatically — no manual registration needed. You can confirm ring discovery happened by checking the logs for a `Quota changed` message, which fires when the per-host RPS quota redistributes across the new pod count:
+This shows every ring member per role with member counts and addresses. After scaling frontend to 3 you should see `"member_count": 3` under the `frontend` role. You can also filter by role:
 
 ```bash
-kubectl logs -n temporal deployment/temporal-stack-frontend --tail=20 | grep "Quota changed"
+kubectl exec -n temporal deployment/temporal-stack-admintools -- \
+  tdbg --address temporal-stack-frontend:7233 membership list-gossip --role frontend
 ```
-
-> **Note:** The `temporal` CLI does not expose ring membership directly. `Quota changed` in the logs is the clearest signal that the new pod joined the ring successfully.
 
 ---
 
