@@ -15,3 +15,61 @@ data:
     #   frontend.namespaceRPS.visibility:
     #     - value: 100
     #       constraints: {}
+
+    #frontend
+    frontend.historyHostErrorPercentage:
+      - value: 0.50
+    frontend.globalNamespaceRPS:
+      - value: 1600
+    frontend.globalRPS:
+      - value: 6000
+    frontend.persistenceMaxQPS:
+      - value: 2400
+    frontend.namespaceCount:
+      - value: 2000
+    frontend.globalNamespaceCount:
+      - value: 20000
+    frontend.namespaceRPS.visibility:
+      - value: 50
+    frontend.globalNamespaceRPS.visibility:
+      - value: 500
+    frontend.keepAliveMinTime:
+      - value: 10s
+    frontend.keepAlivePermitWithoutStream:
+      - value: true
+    #history
+    history.cacheSizeBasedLimit:
+      - value: true
+    history.hostLevelCacheMaxSizeBytes:
+      - value: 100000000
+    history.persistenceGlobalMaxQPS:
+      - value: 36000
+    history.persistenceMaxQPS:
+      - value: 16000
+    history.persistencePerShardNamespaceMaxQPS:
+      - value: 500
+    #matching
+    matching.numTaskqueueReadPartitions:
+      - value: 4
+        constraints: {}
+    matching.numTaskqueueWritePartitions:
+      - value: 4
+        constraints: {}
+    matching.persistenceMaxQPS:
+      - value: 2400
+    matching.outstandingTaskAppendsThreshold:
+      - value: 500
+    matching.priorityLevels:
+      - value: 10
+    #worker
+    worker.schedulerNamespaceStartWorkflowRPS:
+      - value: 100
+    worker.perNamespaceWorkerOptions:
+      - value:
+          MaxConcurrentWorkflowTaskPollers: 25
+          MaxConcurrentActivityTaskPollers: 10
+    worker.perNamespaceWorkerCount:
+      - value: 4
+    #system
+    system.enableActivityEagerExecution:
+      - value: true
