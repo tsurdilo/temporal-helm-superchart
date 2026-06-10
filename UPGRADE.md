@@ -17,9 +17,9 @@ Never reverse this order.
 
 ---
 
-This runbook covers upgrading the Temporal Server version in this Helm chart. The chart runs PostgreSQL for both the main and visibility stores, so every upgrade involves two steps before touching the binary: schema migration on `temporal` and schema migration on `temporal_visibility`.
+This runbook covers upgrading the Temporal Server version in this Helm chart. The chart runs three isolated PostgreSQL instances — one per database — so every upgrade involves schema migrations before touching the binary: `temporal` (main), `temporal_visibility` (primary visibility), and `temporal_visibility_secondary` (secondary visibility, only when `dualVisibility.enabled: true`).
 
-> **Schema must be updated before any new server binary starts.** A server instance that finds its schema behind what the binary expects will refuse to start. Complete Steps 1 and 2 fully before Step 3.
+> **Schema must be updated before any new server binary starts.** A server instance that finds its schema behind what the binary expects will refuse to start. Complete all schema migration steps fully before upgrading the binary.
 
 ---
 
@@ -28,9 +28,10 @@ This runbook covers upgrading the Temporal Server version in this Helm chart. Th
 | Step | Action |
 |------|--------|
 | 1 | Update `temporal` (main) DB schema |
-| 2 | Update `temporal_visibility` DB schema |
-| 3 | Update the chart — binary rolls via Kubernetes rolling update |
-| 4 | Verify |
+| 2 | Update `temporal_visibility` (primary visibility) DB schema |
+| 3 | Update `temporal_visibility_secondary` (secondary visibility) DB schema — only if `dualVisibility.enabled: true` |
+| 4 | Update the chart — binary rolls via Kubernetes rolling update |
+| 5 | Verify |
 
 ---
 
@@ -48,28 +49,28 @@ The custom server image (`temporal-custom-server`) is built against a local Temp
 
 ---
 
-## Step 1 & 2 — Run Schema Migrations
+## Steps 1–3 — Run Schema Migrations
 
 Schema migrations run from within the `admintools` pod, which ships `temporal-sql-tool`.
 
 ```bash
 RELEASE=temporal-stack
 NS=temporal
-PG_POD="${RELEASE}-postgresql-0"
 
-# Verify PostgreSQL is reachable
-kubectl exec -n "$NS" "$PG_POD" -- pg_isready -U temporal -q
+# Verify all PostgreSQL instances are reachable
+kubectl exec -n "$NS" "${RELEASE}-postgresql-main-0" -- pg_isready -U temporal -q
+kubectl exec -n "$NS" "${RELEASE}-postgresql-visibility-0" -- pg_isready -U temporal -q
 
 # Get a shell in admintools
 kubectl exec -it -n "$NS" deployment/${RELEASE}-admintools -- /bin/bash
 ```
 
-Inside the admintools pod, run both schema upgrades. The `--schema-dir` paths point to the schemas embedded in the admintools image at the target version.
+Inside the admintools pod, run schema upgrades for each database. The `--schema-dir` paths point to the schemas embedded in the admintools image at the target version.
 
-**Main DB:**
+**Step 1 — Main DB (`temporal-stack-postgresql-main`):**
 ```bash
 temporal-sql-tool \
-  --ep temporal-stack-postgresql \
+  --ep temporal-stack-postgresql-main \
   --port 5432 \
   --plugin postgres12 \
   --user temporal \
@@ -79,10 +80,10 @@ temporal-sql-tool \
   --schema-dir /etc/temporal/schema/postgresql/v12/temporal/versioned
 ```
 
-**Visibility DB:**
+**Step 2 — Primary visibility DB (`temporal-stack-postgresql-visibility`):**
 ```bash
 temporal-sql-tool \
-  --ep temporal-stack-postgresql \
+  --ep temporal-stack-postgresql-visibility \
   --port 5432 \
   --plugin postgres12 \
   --user temporal \
@@ -92,24 +93,41 @@ temporal-sql-tool \
   --schema-dir /etc/temporal/schema/postgresql/v12/visibility/versioned
 ```
 
+**Step 3 — Secondary visibility DB (`temporal-stack-postgresql-visibility-secondary`) — only if `dualVisibility.enabled: true`:**
+```bash
+temporal-sql-tool \
+  --ep temporal-stack-postgresql-visibility-secondary \
+  --port 5432 \
+  --plugin postgres12 \
+  --user temporal \
+  --password temporal \
+  --db temporal_visibility_secondary \
+  update-schema \
+  --schema-dir /etc/temporal/schema/postgresql/v12/visibility/versioned
+```
+
 **Verify schema versions (still in admintools):**
 ```bash
-# connect to main DB and check
-PGPASSWORD=temporal psql -h temporal-stack-postgresql -U temporal -d temporal \
+# Main DB
+PGPASSWORD=temporal psql -h temporal-stack-postgresql-main -U temporal -d temporal \
   -c "SELECT curr_version FROM schema_version;"
 
-# connect to visibility DB and check
-PGPASSWORD=temporal psql -h temporal-stack-postgresql -U temporal -d temporal_visibility \
+# Primary visibility DB
+PGPASSWORD=temporal psql -h temporal-stack-postgresql-visibility -U temporal -d temporal_visibility \
+  -c "SELECT curr_version FROM schema_version;"
+
+# Secondary visibility DB (only if dualVisibility.enabled: true)
+PGPASSWORD=temporal psql -h temporal-stack-postgresql-visibility-secondary -U temporal -d temporal_visibility_secondary \
   -c "SELECT curr_version FROM schema_version;"
 ```
 
-Both queries should return the version expected by the target Temporal release. Exit the pod when done.
+All queries should return the version expected by the target Temporal release. Exit the pod when done.
 
 ---
 
-## Step 3 — Update the Chart and Rebuild the Custom Image
+## Step 4 — Update the Chart and Rebuild the Custom Image
 
-### 3a. Update the Temporal server source checkout
+### 4a. Update the Temporal server source checkout
 
 ```bash
 cd ~/devel/temporal/temporal
@@ -117,7 +135,7 @@ git fetch --tags
 git checkout v<target-version>
 ```
 
-### 3b. Rebuild the custom server image
+### 4b. Rebuild the custom server image
 
 From the `~/devel` directory (the build context):
 
@@ -126,7 +144,7 @@ cd ~/devel/temporal-helm-superchart
 bash build.sh
 ```
 
-### 3c. Update the chart version pins
+### 4c. Update the chart version pins
 
 In `Chart.yaml`, bump the temporal dependency version:
 ```yaml
@@ -146,26 +164,20 @@ Run `helm dependency update` to pull the new chart:
 helm dependency update .
 ```
 
-### 3d. Set the rolling update drain window
+### 4d. Set the rolling update drain window
 
 Before applying the new chart, set two dynamic config values to give history shards a clean handoff window during the rolling update:
 
 ```bash
-kubectl create configmap temporal-dynconfig \
-  --from-literal=config.yaml="$(kubectl get configmap temporal-dynconfig -n temporal \
-    -o jsonpath='{.data.config\.yaml}')
-history.shutdownDrainDuration:
-  - value: 10s
-    constraints: {}
-history.startupMembershipJoinDelay:
-  - value: 10s
-    constraints: {}
-" \
-  --namespace temporal \
-  --dry-run=client -o yaml | kubectl apply -f -
+DRAIN_PATCH=$(kubectl get configmap temporal-dynconfig -n temporal \
+  -o jsonpath='{.data.config\.yaml}')$'\n'"history.shutdownDrainDuration:"$'\n'"  - value: 10s"$'\n'"    constraints: {}"$'\n'"history.startupMembershipJoinDelay:"$'\n'"  - value: 10s"$'\n'"    constraints: {}"
+kubectl patch configmap temporal-dynconfig -n temporal --type=merge \
+  -p "{\"data\":{\"config.yaml\":$(echo "$DRAIN_PATCH" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}"
 ```
 
-### 3e. Apply the chart upgrade
+> **Note:** Use `kubectl patch` not `kubectl apply` here — the dynconfig ConfigMap is owned by Helm and `kubectl apply` will set a conflicting field manager that causes the next `helm upgrade` to fail.
+
+### 4e. Apply the chart upgrade
 
 ```bash
 helm upgrade temporal-stack . --namespace temporal --reuse-values
@@ -181,7 +193,7 @@ kubectl rollout status deployment/temporal-stack-worker -n temporal
 
 ---
 
-## Step 4 — Verify
+## Step 5 — Verify
 
 **Check all pods are running:**
 ```bash
@@ -294,8 +306,8 @@ This walks through the complete upgrade from a fresh v1.30.0 install to v1.31.0,
 - A6: Confirms schema is at main=1.18, visibility=1.13
 
 **Phase B — upgrades to v1.31.0:**
-- B1: Spins up a temporary `temporalio/admin-tools:1.31.0` pod and runs both schema migrations (main v1.18→v1.19, visibility v1.13→v1.14). Pod is deleted automatically when done.
-- B2: Verifies schema is now main=1.19, visibility=1.14
+- B1: Spins up a temporary `temporalio/admin-tools:1.31.0` pod and runs schema migrations against all active databases: `temporal` (main v1.18→v1.19), `temporal_visibility` (v1.13→v1.14), and `temporal_visibility_secondary` (v1.13→v1.14, only if `dualVisibility.enabled: true`). Pod is deleted automatically when done.
+- B2: Verifies schema is now main=1.19, visibility=1.14 (and visibility-secondary=1.14 if dual vis enabled)
 - B3: Builds the custom server image at v1.31.0
 - B4: Restores `Chart.yaml` and namespace-init to v1.31.0 pins
 - B5: Sets the drain window in dynconfig
@@ -313,7 +325,7 @@ The most common cause is a schema version mismatch. Check the pod logs:
 kubectl logs -n temporal <failing-pod-name> | head -50
 ```
 
-If the error mentions schema version, go back to Steps 1 and 2. If the error is a PostgreSQL connection failure, check that the schema migration jobs completed successfully — the server jobs may have started before migrations finished.
+If the error mentions schema version, go back to Steps 1–3 and verify each database. If the error is a PostgreSQL connection failure, check that the schema migration jobs completed successfully against the correct PostgreSQL instance (`postgresql-main`, `postgresql-visibility`, or `postgresql-visibility-secondary`) — the server jobs may have started before migrations finished.
 
 To force a clean restart after fixing the schema:
 ```bash

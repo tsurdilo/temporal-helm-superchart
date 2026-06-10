@@ -150,32 +150,47 @@ helm upgrade "$RELEASE" . \
   --timeout 20m \
   --reset-values \
   $DUAL_VIS_SET_FLAG \
+  ${EXTRA_HELM_FLAGS:-} \
   2>&1 | grep -v "warnings.go"
 echo "  Helm release deployed."
 
 # ── Step 6 ─────────────────────────────────────────
 step 6 "Waiting for services to be ready"
-echo "  Waiting for Temporal frontend..."
-kubectl rollout status deployment/"$RELEASE"-frontend -n "$NAMESPACE" --timeout=5m
-echo "  Waiting for Temporal worker..."
-kubectl rollout status deployment/"$RELEASE"-worker -n "$NAMESPACE" --timeout=5m
-echo "  Waiting for Grafana..."
-kubectl rollout status deployment/"$RELEASE"-grafana -n "$NAMESPACE" --timeout=5m
-echo "  All services ready."
+# SKIP_SERVER_WAIT=true skips frontend/worker health checks.
+# Used by upgrade-test.sh Phase A where the binary is v1.31.0 but schema is still
+# v1.18 — the server crashes until schema is migrated in Phase B.
+if [[ "${SKIP_SERVER_WAIT:-false}" == "true" ]]; then
+  echo "  SKIP_SERVER_WAIT set — skipping server rollout wait (upgrade-test Phase A mode)."
+  echo "  Waiting for admintools only..."
+  kubectl rollout status deployment/"$RELEASE"-admintools -n "$NAMESPACE" --timeout=3m
+  echo "  Admintools ready. Schema setup complete — server will start after schema migration."
+else
+  echo "  Waiting for Temporal frontend..."
+  kubectl rollout status deployment/"$RELEASE"-frontend -n "$NAMESPACE" --timeout=5m
+  echo "  Waiting for Temporal worker..."
+  kubectl rollout status deployment/"$RELEASE"-worker -n "$NAMESPACE" --timeout=5m
+  echo "  Waiting for Grafana..."
+  kubectl rollout status deployment/"$RELEASE"-grafana -n "$NAMESPACE" --timeout=5m
+  echo "  All services ready."
+fi
 
 # ── Step 7 ─────────────────────────────────────────
 step 7 "Verifying Temporal default namespace"
-# Job may already be cleaned up by hook-delete-policy — wait only if it still exists
-if kubectl get job/"$RELEASE"-namespace-init -n "$NAMESPACE" &>/dev/null; then
-  kubectl wait --for=condition=complete job/"$RELEASE"-namespace-init \
-    --namespace "$NAMESPACE" --timeout=60s 2>/dev/null || true
+if [[ "${SKIP_SERVER_WAIT:-false}" == "true" ]]; then
+  echo "  SKIP_SERVER_WAIT set — skipping namespace verification (upgrade-test Phase A mode)."
+else
+  # Job may already be cleaned up by hook-delete-policy — wait only if it still exists
+  if kubectl get job/"$RELEASE"-namespace-init -n "$NAMESPACE" &>/dev/null; then
+    kubectl wait --for=condition=complete job/"$RELEASE"-namespace-init \
+      --namespace "$NAMESPACE" --timeout=60s 2>/dev/null || true
+  fi
+  until kubectl exec -n "$NAMESPACE" deployment/"$RELEASE"-admintools -- \
+    temporal --address "$RELEASE"-frontend:7233 operator namespace describe -n default \
+    2>/dev/null | grep -q "default"; do
+    sleep 2
+  done
+  echo "  Temporal 'default' namespace ready."
 fi
-until kubectl exec -n "$NAMESPACE" deployment/"$RELEASE"-admintools -- \
-  temporal --address "$RELEASE"-frontend:7233 operator namespace describe -n default \
-  2>/dev/null | grep -q "default"; do
-  sleep 2
-done
-echo "  Temporal 'default' namespace ready."
 
 echo ""
 echo "══════════════════════════════════════════════"

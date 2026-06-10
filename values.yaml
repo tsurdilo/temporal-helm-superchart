@@ -275,6 +275,15 @@ promtail:
       - url: http://temporal-stack-loki:3100/loki/api/v1/push
 
 # -----------------------------------------------------------------------------
+# Namespace init job
+# Set to false to suppress the post-install/post-upgrade namespace-init hook.
+# Used by upgrade-test.sh Phase A (v1.30.0 install) where the server binary is
+# v1.31.0 and won't start against a v1.18 schema — the hook would loop forever.
+# The hook fires correctly in Phase B after schema migration and binary upgrade.
+# -----------------------------------------------------------------------------
+namespaceInit:
+  enabled: true
+
 # MinIO
 # -----------------------------------------------------------------------------
 minio:

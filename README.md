@@ -19,16 +19,17 @@ The result is a complete, realistic starting point that reflects how a Temporal 
 ## What's included
 
 - Temporal Server (frontend ×2, history ×2, matching ×2, worker ×1, internal-frontend ×1)
-- PostgreSQL (main store + visibility store)
+- PostgreSQL (three isolated instances: main store, primary visibility, secondary visibility)
 - Prometheus + Grafana (pre-loaded dashboards and alerts)
 - Loki + Promtail (log aggregation)
 - MinIO (workflow and visibility archival)
 - Health poller (drives per-host `host_health` metrics)
 - ConfigMap-based dynamic config with live reload (no pod restarts required)
+- Dual visibility support (hot standby visibility store with parallel writes, opt-in via `dualVisibility.enabled`)
 
 Everything is pre-wired. No manual configuration required to get started.
 
-> **Running Docker Compose instead of Kubernetes?** See [my-temporal-dockercompose](https://github.com/tsurdilo/my-temporal-dockercompose) for the companion Docker Compose and Swarm setup.
+> **Running Docker Compose instead of Kubernetes?** See [my-temporal-dockercompose](https://github.com/tsurdilo/my-temporal-dockercompose) for the companion Docker Compose setup.
 
 ---
 
