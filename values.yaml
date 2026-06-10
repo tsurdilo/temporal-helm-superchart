@@ -6,20 +6,36 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# PostgreSQL
+# PostgreSQL — three isolated instances
+# postgresql-main:          temporal DB (workflow state, history, task queues)
+# postgresql-visibility:    temporal_visibility DB (primary visibility store)
+# postgresql-visibility-secondary: temporal_visibility_secondary DB (secondary visibility store)
+#                           Only deployed when dualVisibility.enabled: true
 # -----------------------------------------------------------------------------
-postgresql:
-  enabled: true
+postgresql-main:
   auth:
     username: temporal
     password: temporal
     database: temporal
-  primary:
-    initdb:
-      scripts:
-        create-visibility-db.sql: |
-          CREATE DATABASE temporal_visibility;
-          GRANT ALL PRIVILEGES ON DATABASE temporal_visibility TO temporal;
+
+postgresql-visibility:
+  auth:
+    username: temporal
+    password: temporal
+    database: temporal_visibility
+
+postgresql-visibility-secondary:
+  auth:
+    username: temporal
+    password: temporal
+    database: temporal_visibility_secondary
+
+# -----------------------------------------------------------------------------
+# Dual Visibility
+# -----------------------------------------------------------------------------
+dualVisibility:
+  enabled: true
+  schemaHookEnabled: true
 
 # -----------------------------------------------------------------------------
 # Temporal Server
@@ -105,12 +121,16 @@ temporal:
       persistence:
         defaultStore: default
         visibilityStore: visibility
+        # secondaryVisibilityStore is NOT set here — it is injected by install.sh via
+        # --set temporal.server.config.persistence.secondaryVisibilityStore=visibility-secondary
+        # when dualVisibility.enabled: true. Setting it unconditionally here would cause
+        # the schema job to fail when postgresql-visibility-secondary is not deployed.
         numHistoryShards: 2048
         datastores:
           "default":
             sql:
               pluginName: postgres12
-              connectAddr: "temporal-stack-postgresql:5432"
+              connectAddr: "temporal-stack-postgresql-main:5432"
               connectProtocol: "tcp"
               databaseName: temporal
               user: temporal
@@ -122,7 +142,7 @@ temporal:
           "visibility":
             sql:
               pluginName: postgres12
-              connectAddr: "temporal-stack-postgresql:5432"
+              connectAddr: "temporal-stack-postgresql-visibility:5432"
               connectProtocol: "tcp"
               databaseName: temporal_visibility
               user: temporal
@@ -131,6 +151,19 @@ temporal:
               maxIdleConns: 20
               maxConnLifetime: "1h"
               manageSchema: true
+          "visibility-secondary":
+            sql:
+              pluginName: postgres12
+              connectAddr: "temporal-stack-postgresql-visibility-secondary:5432"
+              connectProtocol: "tcp"
+              databaseName: temporal_visibility_secondary
+              user: temporal
+              password: temporal
+              maxConns: 20
+              maxIdleConns: 20
+              maxConnLifetime: "1h"
+              manageSchema: false
+              createDatabase: false
 
   web:
     enabled: true

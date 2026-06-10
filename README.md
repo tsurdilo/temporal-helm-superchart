@@ -2,17 +2,19 @@
 
 ## Why this exists
 
-The [official Temporal Helm chart](https://github.com/temporalio/helm-charts) deploys only the Temporal server components — frontend, history, matching, and worker. It intentionally does not include a database, observability stack, or archival storage. The chart's own documentation explicitly states that any bundled versions of those components are not production-grade and that users are expected to bring their own.
+The [official Temporal Helm chart](https://github.com/temporalio/helm-charts) is the foundation of this project — it handles all the complexity of deploying the Temporal server components (frontend, history, matching, worker) and does so extremely well. Without it, building something like this would require an enormous amount of work.
 
-In practice, this means every team using the Temporal Helm chart has to wire up the same set of surrounding infrastructure themselves:
+What the upstream chart deliberately leaves to the operator is the surrounding infrastructure — a database, an observability stack, archival storage, and a way to manage dynamic config in Kubernetes. This is by design: those choices are environment-specific and the upstream chart is right not to make them for you.
 
-- A PostgreSQL or Cassandra instance for persistence
+This chart — a Helm "super-chart" or umbrella chart — builds on top of the upstream chart and makes those choices for a local Docker Desktop Kubernetes environment. It wraps the upstream chart as a subchart and adds the surrounding infrastructure as properly integrated dependencies:
+
+- A PostgreSQL instance for persistence
 - Prometheus and Grafana for metrics and dashboards
 - A log aggregation stack (Loki + Promtail)
-- An object store for workflow archival (S3, MinIO, GCS)
-- A way to manage Temporal's dynamic config in Kubernetes
+- MinIO for workflow archival
+- A ConfigMap-based dynamic config client with live reload
 
-This chart — a Helm "super-chart" or umbrella chart — does all of that. It wraps the upstream Temporal chart as a subchart and adds all the surrounding infrastructure as properly integrated dependencies, pre-wired and production-oriented. The goal is to give you a complete, realistic starting point rather than a minimal skeleton you have to extend yourself.
+The result is a complete, realistic starting point that reflects how a Temporal cluster actually runs — not just the server in isolation.
 
 ## What's included
 
@@ -48,6 +50,7 @@ Everything is pre-wired. No manual configuration required to get started.
 - [Dynamic config](#dynamic-config)
 - [MinIO and Archival](#minio-and-archival)
 - [Scaling Temporal Services](#scaling-temporal-services)
+- [Dual Visibility](#dual-visibility)
 - [Useful Kubernetes commands](#useful-kubernetes-commands)
 - [Troubleshooting](#troubleshooting)
 - [Upgrading Temporal Server](#upgrading-temporal-server)
@@ -431,6 +434,87 @@ This shows every ring member per role with member counts and addresses. After sc
 kubectl exec -n temporal deployment/temporal-stack-admintools -- \
   tdbg --address temporal-stack-frontend:7233 membership list-gossip --role frontend
 ```
+
+---
+
+## Dual Visibility
+
+This chart supports running two PostgreSQL visibility stores simultaneously — a primary and a secondary. Both stores receive every visibility write in parallel. This gives you a hot standby for visibility queries.
+
+### How it works
+
+`dualVisibility.enabled` is a flag in this chart's `values.yaml` — it is not a Temporal dynamic config key. Setting it to `true` instructs the chart to:
+- Deploy a third PostgreSQL instance (`postgresql-visibility-secondary`) alongside the existing `postgresql-main` and `postgresql-visibility` instances
+- Configure the Temporal server with both `visibilityStore` (primary) and `secondaryVisibilityStore` (secondary)
+- Seed the Temporal dynamic config key `system.secondaryVisibilityWritingMode: dual` into the `temporal-dynconfig` ConfigMap — this is what actually activates parallel writes to both stores
+- Leave reads on the primary store by default (`system.enableReadFromSecondaryVisibility: false`)
+
+### Enabling dual visibility
+
+In `values.yaml`:
+
+```yaml
+dualVisibility:
+  enabled: true
+  schemaHookEnabled: true
+```
+
+When `dualVisibility.enabled: true` the following Temporal dynamic config keys are automatically seeded into the `temporal-dynconfig` ConfigMap at install time:
+
+| Key | Value | Purpose |
+|---|---|---|
+| `system.secondaryVisibilityWritingMode` | `"dual"` | Write every visibility record to both stores in parallel |
+| `system.enableReadFromSecondaryVisibility` | `false` | Reads come from primary store (secondary is write-only by default) |
+
+These can be changed live at any time by editing the ConfigMap — no pod restarts required. See [Dynamic config](#dynamic-config) for how to do that.
+
+Then run a fresh install:
+
+```bash
+bash teardown.sh
+bash install.sh
+```
+
+The install script detects the flag and automatically:
+- Deploys all 3 PostgreSQL instances
+- Applies the visibility schema to `postgresql-visibility-secondary` via a custom Helm hook
+- Wires `secondaryVisibilityStore` into the Temporal persistence config
+- Seeds the dual write dynconfig keys
+
+### Verifying dual write is active
+
+```bash
+# Start a test workflow
+temporal --address localhost:7233 workflow start \
+  --type MyWorkflow --task-queue my-queue --workflow-id vis-check-1
+
+# Check primary visibility store
+kubectl exec -n temporal temporal-stack-postgresql-visibility-0 -- \
+  sh -c "PGPASSWORD=temporal psql -U temporal -d temporal_visibility \
+  -c \"SELECT workflow_id, status FROM executions_visibility WHERE workflow_id = 'vis-check-1'\""
+
+# Check secondary visibility store
+kubectl exec -n temporal temporal-stack-postgresql-visibility-secondary-0 -- \
+  sh -c "PGPASSWORD=temporal psql -U temporal -d temporal_visibility_secondary \
+  -c \"SELECT workflow_id, status FROM executions_visibility WHERE workflow_id = 'vis-check-1'\""
+```
+
+Both queries should return the same row.
+
+You can also confirm both stores are active at the cluster level:
+
+```bash
+temporal operator cluster describe
+# VisibilityStore column should show: postgres12,postgres12
+```
+
+### Known limitation in the upstream Temporal Helm chart
+
+The upstream chart's schema management derives the schema directory name directly from the datastore name. A secondary visibility store named `"visibility-secondary"` causes it to look for a `visibility-secondary/versioned` schema path that does not exist in the admintools image — only `visibility/versioned` exists.
+
+To work around this, this chart sets `manageSchema: false` on the `visibility-secondary` datastore and ships a custom Helm hook job (`templates/visibility-secondary-schema-job.yaml`) that applies the correct `visibility/versioned` schema to `postgresql-visibility-secondary` before the Temporal server starts.
+
+> **TODO:** Failover runbook (switching reads to secondary when primary degrades, recovery sequence, backfill after primary comes back up) will be added once operational behaviour under failure is fully validated. See PLANNING.md for the current draft.
 
 ---
 

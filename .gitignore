@@ -1,6 +1,10 @@
 # Planning docs — internal only
 PLANNING.md
 
+# Local test utilities — not part of the chart
+test-worker/
+test-backlog.sh
+
 # IDE
 .idea/
 

@@ -16,6 +16,17 @@ NAMESPACE=${NAMESPACE:-temporal}
 RELEASE=${RELEASE:-temporal-stack}
 TOTAL_STEPS=7
 
+# Read dualVisibility.enabled from values.yaml
+DUAL_VIS_ENABLED="$(awk '/^dualVisibility:/{found=1} found && /enabled:/{print $2; exit}' "$(dirname "$0")/values.yaml")"
+[[ "$DUAL_VIS_ENABLED" == "true" ]] && DUAL_VIS=true || DUAL_VIS=false
+
+echo ""
+if [[ "$DUAL_VIS" == "true" ]]; then
+  echo "  ✦ Dual visibility: ENABLED (3 PostgreSQL instances, secondaryVisibilityStore wired)"
+else
+  echo "  ✦ Dual visibility: DISABLED (2 PostgreSQL instances, single visibility store)"
+fi
+
 step() {
   echo ""
   echo "──────────────────────────────────────────────"
@@ -65,6 +76,11 @@ echo "  CRDs installed."
 
 # ── Step 4 ─────────────────────────────────────────
 step 4 "Installing PostgreSQL"
+if [[ "$DUAL_VIS" == "true" ]]; then
+  echo "  (Deploying 3 instances: main, visibility, visibility-secondary)"
+else
+  echo "  (Deploying 2 instances: main, visibility)"
+fi
 echo "  (Must be fully ready before Temporal schema jobs run)"
 helm upgrade --install "$RELEASE" . \
   --namespace "$NAMESPACE" \
@@ -75,31 +91,65 @@ helm upgrade --install "$RELEASE" . \
   --set promtail.enabled=false \
   --set minio.enabled=false \
   --set healthPoller.enabled=false \
+  --set dualVisibility.schemaHookEnabled=false \
   2>&1 | grep -v "warnings.go"
-echo "  Waiting for PostgreSQL pod to be ready..."
-kubectl rollout status statefulset/"$RELEASE"-postgresql -n "$NAMESPACE" --timeout=5m
+
+echo "  Waiting for PostgreSQL pods to be ready..."
+kubectl rollout status statefulset/"$RELEASE"-postgresql-main -n "$NAMESPACE" --timeout=5m
+kubectl rollout status statefulset/"$RELEASE"-postgresql-visibility -n "$NAMESPACE" --timeout=5m
+if [[ "$DUAL_VIS" == "true" ]]; then
+  kubectl rollout status statefulset/"$RELEASE"-postgresql-visibility-secondary -n "$NAMESPACE" --timeout=5m
+fi
+
 echo "  Waiting for PostgreSQL to accept connections..."
-until kubectl exec -n "$NAMESPACE" "$RELEASE"-postgresql-0 -- \
+until kubectl exec -n "$NAMESPACE" "$RELEASE"-postgresql-main-0 -- \
   pg_isready -U temporal -d temporal -q 2>/dev/null; do
   sleep 2
 done
-echo "  Verifying PostgreSQL is reachable from within the cluster..."
+
+echo "  Verifying all PostgreSQL instances are reachable from within the cluster..."
 echo "  (Pulling postgres:16-alpine for the check — may take a moment on first run)"
 until kubectl run pg-cluster-check --rm -i --restart=Never \
   --image=postgres:16-alpine -n "$NAMESPACE" \
   --env="PGPASSWORD=temporal" \
-  --command -- psql -h "$RELEASE-postgresql" -U temporal -d temporal -c "SELECT 1" &>/dev/null; do
+  --command -- psql -h "$RELEASE-postgresql-main" -U temporal -d temporal -c "SELECT 1" &>/dev/null; do
   sleep 3
 done
-echo "  PostgreSQL fully ready."
+echo "    postgresql-main ready."
+
+until kubectl run pg-vis-check --rm -i --restart=Never \
+  --image=postgres:16-alpine -n "$NAMESPACE" \
+  --env="PGPASSWORD=temporal" \
+  --command -- psql -h "$RELEASE-postgresql-visibility" -U temporal -d temporal_visibility -c "SELECT 1" &>/dev/null; do
+  sleep 3
+done
+echo "    postgresql-visibility ready."
+
+if [[ "$DUAL_VIS" == "true" ]]; then
+  until kubectl run pg-vis-sec-check --rm -i --restart=Never \
+    --image=postgres:16-alpine -n "$NAMESPACE" \
+    --env="PGPASSWORD=temporal" \
+    --command -- psql -h "$RELEASE-postgresql-visibility-secondary" -U temporal -d temporal_visibility_secondary -c "SELECT 1" &>/dev/null; do
+    sleep 3
+  done
+  echo "    postgresql-visibility-secondary ready."
+fi
+
+echo "  All PostgreSQL instances fully ready."
 
 # ── Step 5 ─────────────────────────────────────────
 step 5 "Installing full stack"
 echo "  (Deploying Temporal, Prometheus, Grafana, Loki, MinIO — this takes 3-5 minutes)"
+DUAL_VIS_SET_FLAG=""
+if [[ "$DUAL_VIS" == "true" ]]; then
+  echo "  Dual visibility enabled — wiring secondaryVisibilityStore."
+  DUAL_VIS_SET_FLAG="--set temporal.server.config.persistence.secondaryVisibilityStore=visibility-secondary"
+fi
 helm upgrade "$RELEASE" . \
   --namespace "$NAMESPACE" \
   --timeout 20m \
   --reset-values \
+  $DUAL_VIS_SET_FLAG \
   2>&1 | grep -v "warnings.go"
 echo "  Helm release deployed."
 

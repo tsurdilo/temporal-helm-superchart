@@ -4,3 +4,5 @@
 images/
 PLANNING.md
 tmp/
+test-worker/
+test-backlog.sh

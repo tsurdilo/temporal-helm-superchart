@@ -73,3 +73,9 @@ data:
     #system
     system.enableActivityEagerExecution:
       - value: true
+    {{- if .Values.dualVisibility.enabled }}
+    system.secondaryVisibilityWritingMode:
+      - value: "dual"
+    system.enableReadFromSecondaryVisibility:
+      - value: false
+    {{- end }}
