@@ -125,7 +125,7 @@ helm version
 
 The chart uses two locally-built images:
 
-- **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in, enabling live dynamic config reloads from the Kubernetes ConfigMap.
+- **`temporal-custom-server`** — Temporal server with [temporal-configmap-dynconfig](https://github.com/tsurdilo/temporal-configmap-dynconfig) compiled in, enabling live dynamic config reloads from the Kubernetes ConfigMap. Also includes a **plaintext payload interceptor** on the frontend gRPC server — detects unencrypted payload encodings (`json/plain`, `binary/plain`) across all major APIs (workflow start, signal, query, update, activity heartbeat, schedules, and task completions), logs a warning, and increments a `plaintext_payload_detected_total` counter metric. Observe-only — requests are always allowed through.
 - **`temporal-health-poller`** — Calls `AdminHandler.DeepHealthCheck` on each history pod and emits the `host_health` gauge to Prometheus.
 
 The server version is controlled by `appVersion` in `Chart.yaml` — that is the single source of truth. `install.sh` reads it automatically when building images. To target a different version, update `appVersion` in `Chart.yaml` first, then run `install.sh`.
