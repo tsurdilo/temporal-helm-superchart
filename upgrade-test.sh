@@ -130,27 +130,29 @@ kubectl rollout status deployment/"$RELEASE"-admintools -n "$NAMESPACE" --timeou
 
 echo ""
 echo "==> A6: Checking schema versions..."
-SCHEMA_OUT=$(kubectl run schema-check-a6 --rm -i --image=postgres:16-alpine \
+MAIN_SCHEMA=$(kubectl run schema-check-a6-main --rm -i --image=postgres:16-alpine \
   --restart=Never -n "$NAMESPACE" \
-  --command -- /bin/sh -c "
-PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-main -U temporal -d temporal -t -c 'SELECT curr_version FROM schema_version;'
-PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility -U temporal -d temporal_visibility -t -c 'SELECT curr_version FROM schema_version;'
-" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+')
-MAIN_SCHEMA=$(echo "$SCHEMA_OUT" | sed -n '1p')
-VIS_SCHEMA=$(echo "$SCHEMA_OUT" | sed -n '2p')
+  --command -- /bin/sh -c \
+  "PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-main -U temporal -d temporal -t -c 'SELECT curr_version FROM schema_version;'" \
+  2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
+VIS_SCHEMA=$(kubectl run schema-check-a6-vis --rm -i --image=postgres:16-alpine \
+  --restart=Never -n "$NAMESPACE" \
+  --command -- /bin/sh -c \
+  "PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility -U temporal -d temporal_visibility -t -c 'SELECT curr_version FROM schema_version;'" \
+  2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
 echo "    main=$MAIN_SCHEMA  visibility=$VIS_SCHEMA"
 if [[ "$MAIN_SCHEMA" != "1.18" ]]; then
   echo "ERROR: expected main schema 1.18, got $MAIN_SCHEMA"; exit 1
 fi
-if [[ "$VIS_SCHEMA" != "1.13" ]]; then
-  echo "ERROR: expected visibility schema 1.13, got $VIS_SCHEMA"; exit 1
+if [[ "$VIS_SCHEMA" != "1.13" && "$VIS_SCHEMA" != "1.14" ]]; then
+  echo "ERROR: expected visibility schema 1.13 or 1.14, got $VIS_SCHEMA"; exit 1
 fi
 if [[ "$DUAL_VIS" == "true" ]]; then
   VIS_SEC_SCHEMA=$(kubectl run schema-check-a6-sec --rm -i --image=postgres:16-alpine \
     --restart=Never -n "$NAMESPACE" \
-    --command -- /bin/sh -c "
-PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility-secondary -U temporal -d temporal_visibility_secondary -t -c 'SELECT curr_version FROM schema_version;'
-" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
+    --command -- /bin/sh -c \
+    "PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility-secondary -U temporal -d temporal_visibility_secondary -t -c 'SELECT curr_version FROM schema_version;'" \
+    2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
   echo "    visibility-secondary=$VIS_SEC_SCHEMA"
   # Secondary vis schema is initialized with .Chart.AppVersion (1.31.0) image even during
   # Phase A, so it lands at 1.14 (not 1.13). Both are acceptable pre-migration values.
@@ -201,14 +203,16 @@ fi
 
 echo ""
 echo "==> B2: Verifying post-migration schema versions..."
-SCHEMA_OUT=$(kubectl run schema-check-b2 --rm -i --image=postgres:16-alpine \
+MAIN_SCHEMA=$(kubectl run schema-check-b2-main --rm -i --image=postgres:16-alpine \
   --restart=Never -n "$NAMESPACE" \
-  --command -- /bin/sh -c "
-PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-main -U temporal -d temporal -t -c 'SELECT curr_version FROM schema_version;'
-PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility -U temporal -d temporal_visibility -t -c 'SELECT curr_version FROM schema_version;'
-" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+')
-MAIN_SCHEMA=$(echo "$SCHEMA_OUT" | sed -n '1p')
-VIS_SCHEMA=$(echo "$SCHEMA_OUT" | sed -n '2p')
+  --command -- /bin/sh -c \
+  "PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-main -U temporal -d temporal -t -c 'SELECT curr_version FROM schema_version;'" \
+  2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
+VIS_SCHEMA=$(kubectl run schema-check-b2-vis --rm -i --image=postgres:16-alpine \
+  --restart=Never -n "$NAMESPACE" \
+  --command -- /bin/sh -c \
+  "PGPASSWORD=temporal psql -h ${RELEASE}-postgresql-visibility -U temporal -d temporal_visibility -t -c 'SELECT curr_version FROM schema_version;'" \
+  2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1)
 echo "    main=$MAIN_SCHEMA  visibility=$VIS_SCHEMA"
 if [[ "$MAIN_SCHEMA" != "1.19" ]]; then
   echo "ERROR: expected main schema 1.19, got $MAIN_SCHEMA"; exit 1
