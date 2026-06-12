@@ -309,7 +309,7 @@ healthPoller:
     repository: temporal-health-poller
     tag: latest
     pullPolicy: Never
-  frontendAddr: "temporal-stack-frontend:7233"
+  frontendAddr: "temporal-stack-internal-frontend:7236"
   pollInterval: "15s"
 
 # -----------------------------------------------------------------------------
