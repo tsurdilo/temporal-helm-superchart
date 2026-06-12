@@ -1,0 +1,42 @@
+{{/*
+  tls.yaml — validates TLS configuration at helm install/upgrade time.
+
+  This template does NOT create any K8s resources. It only fails fast with a
+  clear error message if required TLS values are missing or inconsistent.
+
+  Actual wiring (volumes, mounts, server.config.tls.*) is handled by install.sh
+  via --set flags because temporal.server.* are subchart values and cannot be
+  mutated by sibling templates.
+
+  Upstream chart confirmed support:
+    additionalVolumes/additionalVolumeMounts: server-deployment.yaml:148,177
+    server.config.tls passthrough:            server-configmap.yaml:48
+*/}}
+
+{{- if .Values.tls.frontend.enabled }}
+
+  {{- if not .Values.tls.frontend.existingSecret }}
+    {{- fail "tls.frontend.enabled is true but tls.frontend.existingSecret is empty. Create a K8s Secret with tls.crt, tls.key, and ca.crt and set tls.frontend.existingSecret to its name." }}
+  {{- end }}
+
+  {{- if not .Values.tls.frontend.serverName }}
+    {{- fail "tls.frontend.enabled is true but tls.frontend.serverName is empty. Set it to the DNS SAN in your frontend server cert (e.g. temporal-stack-frontend.temporal.svc.cluster.local or your external hostname)." }}
+  {{- end }}
+
+{{- end }}
+
+{{- if .Values.tls.internode.enabled }}
+
+  {{- if not .Values.tls.frontend.enabled }}
+    {{- fail "tls.internode.enabled is true but tls.frontend.enabled is false. Internode TLS requires frontend TLS to also be enabled." }}
+  {{- end }}
+
+  {{- if not .Values.tls.internode.existingSecret }}
+    {{- fail "tls.internode.enabled is true but tls.internode.existingSecret is empty. Create a K8s Secret with tls.crt, tls.key, and ca.crt and set tls.internode.existingSecret to its name." }}
+  {{- end }}
+
+  {{- if not .Values.tls.internode.serverName }}
+    {{- fail "tls.internode.enabled is true but tls.internode.serverName is empty. Set it to the DNS SAN in your internode server cert." }}
+  {{- end }}
+
+{{- end }}

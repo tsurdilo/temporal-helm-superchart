@@ -270,7 +270,7 @@ echo "==> B7: Verifying upgrade to $TO_SERVER..."
 kubectl get pods -n "$NAMESPACE" | grep -v Completed
 echo ""
 kubectl exec -n "$NAMESPACE" deployment/"$RELEASE"-admintools -- \
-  temporal --address "$RELEASE"-frontend:7233 operator cluster describe \
+  temporal --address "$RELEASE"-internal-frontend:7236 operator cluster describe \
   | grep -i "server\|version" || true
 
 echo ""

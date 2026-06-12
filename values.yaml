@@ -172,6 +172,10 @@ temporal:
       type: NodePort
       port: 8080
       nodePort: 30080
+    # Auth env vars — populated by templates/auth.yaml when auth.enabled: true
+    # Do not set these manually; they are managed by the auth template.
+    additionalEnv: []
+    additionalEnvSecretName: ""
 
   serviceAccount:
     create: true
@@ -307,6 +311,145 @@ healthPoller:
     pullPolicy: Never
   frontendAddr: "temporal-stack-frontend:7233"
   pollInterval: "15s"
+
+# -----------------------------------------------------------------------------
+# Authentication
+# -----------------------------------------------------------------------------
+# auth.enabled: true  wires JWT validation into Temporal server and enables
+#                     OAuth2 login on the Temporal UI.
+#
+# Local (Docker Desktop): set dex.enabled: true — a bundled Dex OIDC provider
+#   issues JWTs using static users defined below. No external IDP needed.
+#
+# Production: set dex.enabled: false and supply your IDP's JWKS endpoint and
+#   OIDC discovery URL (Okta, Auth0, Keycloak, etc.) via auth.jwt / auth.ui.
+# -----------------------------------------------------------------------------
+auth:
+  enabled: true
+
+  # JWT validation — wired into temporal server global.authorization
+  jwt:
+    # keySourceURIs: auto-populated from Dex service URL when dex.enabled: true
+    # For production (dex.enabled: false) set this to your IDP's JWKS endpoint:
+    #   keySourceURIs:
+    #     - https://your-okta-domain/oauth2/default/v1/keys
+    keySourceURIs: []
+    refreshInterval: 1m
+    audience: ""
+    permissionsClaimName: permissions
+    # permissionsRegex: parses permissions claim into namespace+role
+    # e.g. "^(?P<role>\\w+):(?P<namespace>\\w+)$" matches "admin:default"
+    permissionsRegex: ""
+
+  # Web UI OAuth2 config — wired into temporal.web.additionalEnv
+  ui:
+    # providerUrl: URL the UI SERVER uses to fetch the OIDC discovery doc at startup.
+    # Must be reachable from inside the pod — use the internal K8s service name.
+    # The browser redirect URL comes from Dex's issuer (dex.config.issuer) via the
+    # discovery doc's authorization_endpoint — set dex.config.issuer to a
+    # browser-reachable URL (localhost NodePort for local, public hostname for prod).
+    # For production (dex.enabled: false) set to your IDP's OIDC discovery URL.
+    providerUrl: ""
+    clientId: temporal-ui
+    # callbackUrl: must match the redirect URI registered with your IDP
+    # For local Docker Desktop: http://<your-static-ip>:30080/auth/sso/callback
+    callbackUrl: "http://localhost:30080/auth/sso/callback"
+    scopes: "openid,profile,email"
+    # Client secret — reference an existing K8s secret (never inline the value)
+    # When dex.enabled: true this is auto-created from dex.staticClients[0].secret
+    existingSecret: "temporal-dex-client-secret"
+    existingSecretKey: "TEMPORAL_AUTH_CLIENT_SECRET"
+
+# -----------------------------------------------------------------------------
+# Dex — bundled OIDC identity provider (local only)
+# Set dex.enabled: false in production and use your own IDP instead.
+# -----------------------------------------------------------------------------
+dex:
+  enabled: true
+  config:
+    # Issuer URL must be identical everywhere: browser, UI pod, and Temporal server.
+    # It must be a URL reachable from ALL three — the browser, pods inside the
+    # cluster, and the Temporal server doing JWKS fetches.
+    #
+    # Issuer must resolve identically from: browser, UI pod, and Temporal server.
+    # host.docker.internal resolves to the host machine from inside pods AND the
+    # browser on Docker Desktop. Docker Desktop should add this automatically but
+    # sometimes omits it — see README "Prerequisites" for the one-time fix.
+    # Production: set dex.enabled: false and use your own IDP with a real hostname.
+    issuer: http://host.docker.internal:30556/dex
+
+    storage:
+      type: memory
+
+    web:
+      http: 0.0.0.0:5556
+
+    oauth2:
+      skipApprovalScreen: true
+      responseTypes:
+        - code
+      grantTypes:
+        - authorization_code
+        - refresh_token
+        - "urn:ietf:params:oauth2:grant-type:device_code"
+
+    # Required when staticPasswords is used
+    enablePasswordDB: true
+
+    staticClients:
+      - id: temporal-ui
+        name: Temporal UI
+        secret: temporal-ui-secret
+        # redirectURIs must include every URL the browser may land on after login.
+        # Add your public hostname here if exposing via ingress.
+        redirectURIs:
+          - http://localhost:30080/auth/sso/callback
+      - id: temporal-cli
+        name: Temporal CLI/SDK
+        # Public PKCE client — no secret. Used by scripts/dex-login.go to get
+        # a JWT for CLI and SDK testing without a browser-embedded redirect.
+        public: true
+        redirectURIs:
+          - http://localhost:7788/callback
+
+    staticPasswords:
+      - email: admin@temporal.io
+        # bcrypt hash of "admin" — change for any non-local deployment
+        hash: "$2y$10$3hiEd4su64CbNiBVAnPDouYvwtjPnW7UMUiZiUuiwjnYXcQT060jy"
+        username: admin
+        userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+
+  service:
+    type: NodePort
+    ports:
+      http:
+        port: 5556
+        nodePort: 30556
+
+# -----------------------------------------------------------------------------
+# TLS
+# Phase B.1: encrypt the frontend wire (server cert only)
+# Phase B.2: add requireClientAuth: true — server demands client cert from workers/CLI
+# Phase C:   internode TLS between Temporal services
+#
+# All disabled by default. Production deployments bring their own certs via K8s Secrets.
+# See PLANNING.md "Phase B" for cert generation commands and wiring details.
+# -----------------------------------------------------------------------------
+tls:
+  frontend:
+    enabled: false           # Phase B.1: wire frontend TLS (server cert)
+    requireClientAuth: false # Phase B.2: enforce client cert from SDK workers + CLI
+    # K8s Secret with tls.crt (server cert), tls.key, ca.crt
+    # Create with: kubectl create secret generic temporal-frontend-tls \
+    #   --from-file=tls.crt=frontend.crt --from-file=tls.key=frontend.key --from-file=ca.crt=ca.crt
+    existingSecret: ""
+    # DNS SAN in the frontend server cert — must match what clients use as serverName
+    # For Docker Desktop local: "temporal-stack-frontend.temporal.svc.cluster.local"
+    serverName: ""
+  internode:
+    enabled: false           # Phase C: encrypt internode service traffic
+    existingSecret: ""       # K8s Secret with tls.crt, tls.key, ca.crt
+    serverName: ""
 
 # -----------------------------------------------------------------------------
 # Global storage class

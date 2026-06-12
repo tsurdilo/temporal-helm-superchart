@@ -11,6 +11,7 @@ import (
 
 	configmapdynconfig "github.com/temporalio/temporal-configmap-dynconfig"
 	minioarchiver "github.com/temporalio/temporal-custom-server/archiver"
+	customauth "github.com/temporalio/temporal-custom-server/auth"
 	"github.com/temporalio/temporal-custom-server/interceptors"
 	"github.com/urfave/cli/v2"
 	"go.temporal.io/server/common/authorization"
@@ -165,7 +166,7 @@ func buildCLI() *cli.App {
 			},
 			Action: func(c *cli.Context) error {
 				services := c.StringSlice("service")
-				allowNoAuth := c.Bool("allow-no-auth")
+				_ = c.Bool("allow-no-auth") // flag kept for CLI compat; custom authorizer ignores it
 
 				if c.IsSet("services") {
 					stdlog.Println("WARNING: --services flag is deprecated. Specify multiply --service flags instead.")
@@ -207,27 +208,22 @@ func buildCLI() *cli.App {
 					tag.Bool("debug-mode", debug.Enabled),
 				)
 
-				authorizer, err := authorization.GetAuthorizerFromConfig(&cfg.Global.Authorization)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("Unable to instantiate authorizer. Error: %v", err), 1)
-				}
-				if authorization.IsNoopAuthorizer(authorizer) && !allowNoAuth {
-					logger.Warn(
-						"Not using any authorizer and flag `--allow-no-auth` not detected. " +
-							"Future versions will require using the flag `--allow-no-auth` " +
-							"if you do not want to set an authorizer.",
-					)
-				}
+				// Use our custom authorizer — wraps the default authorizer and adds
+				// task queue restrictions (via TEMPORAL_BLOCKED_TASK_QUEUES env var).
+				// With authorizer=default in server config, no JWT = denied.
+				authorizer := customauth.NewCustomAuthorizer(logger)
 
-				claimMapper, err := authorization.GetClaimMapperFromConfig(&cfg.Global.Authorization, logger)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("Unable to instantiate claim mapper: %v.", err), 1)
-				}
+				// Use our custom claim mapper — falls back to email-based permissions
+				// for Dex static password JWTs that have no permissions claim.
+				// For production IDPs that issue permissions claims, the default
+				// mapper path is used transparently.
+				claimMapper := customauth.NewCustomClaimMapper(&cfg.Global.Authorization, logger)
 
 				audienceMapper, err := authorization.GetAudienceMapperFromConfig(&cfg.Global.Authorization)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("Unable to instantiate audience mapper: %v.", err), 1)
 				}
+				_ = audienceMapper // kept for future use
 
 				metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
 				if err != nil {

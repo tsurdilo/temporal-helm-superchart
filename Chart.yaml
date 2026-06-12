@@ -53,5 +53,11 @@ dependencies:
     repository: "https://grafana.github.io/helm-charts"
     condition: promtail.enabled
 
+  # Dex — OIDC identity provider for local auth (disabled in production — bring your own IDP)
+  - name: dex
+    version: "0.24.1"
+    repository: "https://dexidp.github.io/helm-charts"
+    condition: dex.enabled
+
   # MinIO is deployed via templates/minio.yaml using the official minio/minio image
   # (not a subchart — the Bitnami MinIO chart image is not available on Docker Hub)

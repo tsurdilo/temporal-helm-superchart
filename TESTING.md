@@ -663,6 +663,272 @@ Expected: all workflows listed, reads back on primary.
 
 ---
 
+## Phase 10 — Authentication
+
+> Auth is enabled by default. This phase verifies the full JWT enforcement chain:
+> no-JWT rejection, Dex SSO login, token issuance via PKCE, authenticated CLI access,
+> the custom email-based claim mapper, and task queue blocking.
+>
+> **Prerequisites:** Dex is running, `host.docker.internal` resolves (see Prerequisite 5 in README).
+
+### Step 1 — Verify Dex is running and JWKS is reachable
+
+```bash
+kubectl get pods -n temporal | grep dex
+```
+
+Expected: `temporal-stack-dex-xxx   1/1   Running`
+
+Check Dex startup logs:
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-dex | grep -E "config|listening"
+```
+
+Expected output includes:
+```
+config static client  client_name="Temporal UI"
+config static client  client_name="Temporal CLI/SDK"
+config connector: local passwords enabled
+listening on  server=http address=0.0.0.0:5556
+```
+
+Verify the JWKS endpoint is reachable from the host:
+
+```bash
+curl -s http://host.docker.internal:30556/dex/keys \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Keys: {len(d[\"keys\"])}, alg: {d[\"keys\"][0][\"alg\"]}')"
+```
+
+Expected: `Keys: 2, alg: RS256`
+
+Also verify the Temporal server loaded them (check frontend startup logs):
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-frontend --since=10m \
+  | grep -i "blocked\|task queue blocked" | head -5
+```
+
+If `TEMPORAL_BLOCKED_TASK_QUEUES` was set at startup you'll see `Task queue blocked from worker polling` lines. Normally empty on a fresh install.
+
+---
+
+### Step 2 — Verify unauthenticated calls are rejected
+
+From the host, call the Temporal gRPC API without a JWT:
+
+```bash
+temporal --address localhost:7233 operator namespace list 2>&1
+```
+
+Expected:
+```
+time=... level=ERROR msg="failed listing namespaces: Request unauthorized."
+```
+
+This confirms `authorizer=default` is active and the custom authorizer is running.
+
+Also verify from inside the cluster using admintools (no JWT):
+
+```bash
+kubectl exec -n temporal deployment/temporal-stack-admintools -- \
+  temporal --address temporal-stack-frontend:7233 operator namespace describe default 2>&1
+```
+
+Expected: `Request unauthorized.`
+
+---
+
+### Step 3 — Verify the UI requires login and SSO works
+
+Open [http://localhost:30080](http://localhost:30080) in a browser.
+
+Expected: browser redirects to Dex login page at `http://host.docker.internal:30556/dex/auth?...`
+
+> If the browser lands on a DNS error instead of the Dex login page, `host.docker.internal`
+> is not resolving. Run: `echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts`
+> then reload.
+
+Log in with `admin@temporal.io` / `admin`.
+
+Expected: redirected back to `http://localhost:30080/namespaces/default/workflows`. The namespace list is visible and no 403 errors appear in the browser console.
+
+---
+
+### Step 4 — Get a JWT for CLI and SDK testing
+
+Dex only supports the authorization code flow — use the included helper script, which opens a
+browser tab, handles PKCE locally, and prints the access token:
+
+```bash
+cd temporal-helm-superchart
+JWT=$(go run scripts/dex-login.go)
+echo $JWT | cut -c1-40   # should start with eyJ
+```
+
+When the browser tab opens, log in with `admin@temporal.io` / `admin`. The script captures the
+callback at `localhost:7788` and exits. The token is printed to stdout.
+
+Save it for subsequent steps:
+
+```bash
+export JWT=$(go run scripts/dex-login.go)
+```
+
+---
+
+### Step 5 — Verify authenticated CLI works
+
+```bash
+temporal --address localhost:7233 \
+  --grpc-meta "authorization=Bearer $JWT" \
+  operator namespace list
+```
+
+Expected: both `temporal-system` and `default` namespaces returned with no error.
+
+```bash
+temporal --address localhost:7233 \
+  --grpc-meta "authorization=Bearer $JWT" \
+  operator namespace describe default
+```
+
+Expected: namespace details for `default` returned.
+
+```bash
+temporal --address localhost:7233 \
+  --grpc-meta "authorization=Bearer $JWT" \
+  workflow list --namespace default
+```
+
+Expected: workflow list returned (empty is fine — no error means auth passed).
+
+---
+
+### Step 6 — Verify the custom claim mapper: email → admin role
+
+The JWT for `admin@temporal.io` has no `permissions` claim (Dex static passwords don't support
+custom claims). The custom claim mapper detects this and falls back to email-based role
+assignment: `admin@temporal.io` → `temporal-system:admin + default:admin`.
+
+Confirm that admin-level operations work with this token:
+
+```bash
+# UpdateNamespace requires admin role — should succeed
+temporal --address localhost:7233 \
+  --grpc-meta "authorization=Bearer $JWT" \
+  operator namespace update --namespace default --description "auth test"
+```
+
+Expected: no error, namespace description updated.
+
+```bash
+# Reset description
+temporal --address localhost:7233 \
+  --grpc-meta "authorization=Bearer $JWT" \
+  operator namespace update --namespace default --description ""
+```
+
+Confirm the claim mapper logged the email-based mapping (frontend logs):
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-frontend --since=5m \
+  | grep -i "claim\|email\|permission" | head -10
+```
+
+---
+
+### Step 7 — Verify task queue blocking
+
+Set a blocked task queue on all server pods:
+
+```bash
+for svc in frontend history matching; do
+  kubectl set env deployment/temporal-stack-$svc \
+    TEMPORAL_BLOCKED_TASK_QUEUES=HelloActivityTaskQueue -n temporal
+done
+
+# Wait for rollout
+kubectl rollout status deployment/temporal-stack-frontend -n temporal --timeout=60s
+```
+
+Confirm the authorizer loaded the block at startup:
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-frontend --since=2m \
+  | grep "Task queue blocked"
+```
+
+Expected:
+```
+{"level":"info","msg":"Task queue blocked from worker polling.","wf-task-queue-name":"HelloActivityTaskQueue",...}
+```
+
+Now verify that polling the blocked queue is denied, while a different queue goes through:
+
+```bash
+# Blocked queue — must be denied
+TEMPORAL_TOKEN=$JWT go run scripts/poll-test.go HelloActivityTaskQueue
+# Expected: Poll(HelloActivityTaskQueue): rpc error: code = PermissionDenied desc = Request unauthorized.
+
+# Different queue — must be allowed
+TEMPORAL_TOKEN=$JWT go run scripts/poll-test.go SomeOtherQueue
+# Expected: Poll(SomeOtherQueue): ✅ allowed (no task — queue is NOT blocked)
+```
+
+The test script is at `scripts/poll-test.go` in the repo.
+
+Clean up after the test:
+
+```bash
+for svc in frontend history matching; do
+  kubectl set env deployment/temporal-stack-$svc TEMPORAL_BLOCKED_TASK_QUEUES- -n temporal
+done
+```
+
+---
+
+### Step 8 — Verify internal services bypass JWT enforcement
+
+Internal Temporal services (history, matching, worker-service) connect via `internal-frontend`
+(port 7236) which bypasses JWT auth entirely. Confirm they are healthy and have no auth errors:
+
+```bash
+kubectl get pods -n temporal | grep -E "history|matching|worker" | grep -v admintools
+```
+
+Expected: all Running, no CrashLoopBackOff.
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-history --since=2m \
+  | grep -i "unauthorized\|permission denied" | head -5
+```
+
+Expected: no output — internal services never hit the JWT gate.
+
+Also verify the namespace-init job completed successfully (it uses internal-frontend too):
+
+```bash
+kubectl get job -n temporal | grep namespace-init
+```
+
+Expected: `COMPLETIONS: 1/1`
+
+---
+
+### Step 9 — Verify JWKS refresh is working (no key errors after 1 minute)
+
+Wait ~2 minutes after install, then check for any JWKS fetch errors:
+
+```bash
+kubectl logs -n temporal deployment/temporal-stack-frontend --since=5m \
+  | grep -i "error.*key\|key.*error\|jwks" | head -10
+```
+
+Expected: no errors. The server re-fetches Dex keys every 1 minute silently in the background.
+
+---
+
 ## Checklist Summary
 
 | # | Test | Pass |
@@ -693,3 +959,18 @@ Expected: all workflows listed, reads back on primary.
 | 24 | (dual vis) Workflows execute normally during primary visibility outage | |
 | 25 | (dual vis) History retries visibility writes during outage (logs show retries) | |
 | 26 | (dual vis) Primary converges after restore — outage workflows appear in primary | |
+| 27 | Dex pod running, JWKS endpoint returns RS256 keys | |
+| 28 | UI redirects to Dex login at host.docker.internal:30556 | |
+| 29 | UI login with admin@temporal.io / admin succeeds | |
+| 30 | Unauthenticated CLI returns `Request unauthorized` | |
+| 31 | `go run scripts/dex-login.go` returns a JWT starting with `eyJ` | |
+| 32 | Authenticated CLI `operator namespace list` succeeds with `--grpc-meta` | |
+| 33 | Authenticated CLI `operator namespace describe default` succeeds | |
+| 34 | Authenticated CLI `workflow list` succeeds | |
+| 35 | `operator namespace update` succeeds (confirms admin role via email mapping) | |
+| 36 | Poll blocked task queue returns `PermissionDenied` | |
+| 37 | Poll non-blocked task queue returns empty (allowed) | |
+| 38 | Frontend logs show no JWKS key errors after 2 minutes | |
+| 39 | Internal services (history/matching) have no auth errors in logs | |
+| 40 | namespace-init job shows `COMPLETIONS: 1/1` | |
+| 35 | History/matching pods show no unauthorized errors (internal-frontend bypass working) | |

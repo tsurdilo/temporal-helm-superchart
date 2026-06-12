@@ -179,6 +179,8 @@ kubectl patch configmap temporal-dynconfig -n temporal --type=merge \
 
 ### 4e. Apply the chart upgrade
 
+> **Auth during the rolling update:** JWT enforcement stays active throughout the rolling upgrade — the custom authorizer is part of `temporal-custom-server` and carries over to the new binary. Existing tokens issued by Dex remain valid (Dex is not restarted). Workers and CLI connections using valid JWTs will continue to work during the pod turnover. Workers without JWTs will continue to be rejected exactly as before.
+
 ```bash
 helm upgrade temporal-stack . --namespace temporal --reuse-values
 ```
@@ -202,8 +204,9 @@ kubectl get pods -n temporal
 
 **Check server version:**
 ```bash
+# Use internal-frontend (port 7236) — bypasses JWT enforcement so no token needed
 kubectl exec -n temporal deployment/temporal-stack-admintools -- \
-  temporal --address temporal-stack-frontend:7233 operator cluster describe
+  temporal --address temporal-stack-internal-frontend:7236 operator cluster describe
 ```
 
 **Check for startup errors:**
@@ -216,7 +219,7 @@ A schema mismatch at startup looks like:
 sql schema version compatibility check failed: version mismatch for keyspace/database: "temporal"
 Expected version: X.X cannot be greater than Actual version: Y.Y
 ```
-If you see this, the schema migration did not fully apply. Re-run Steps 1 and 2.
+If you see this, the schema migration did not fully apply. Re-run Steps 1–3 (Step 3 only if `dualVisibility.enabled: true`).
 
 **Reset drain window config:**
 

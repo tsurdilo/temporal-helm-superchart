@@ -1,0 +1,76 @@
+{{- if .Values.auth.enabled }}
+{{/*
+  auth.yaml — wires JWT auth into Temporal server and UI when auth.enabled: true.
+
+  What this template does:
+  1. Creates a K8s Secret holding the Dex/IDP client secret (referenced by the UI pod)
+  2. Patches temporal.web additionalEnv with the UI OAuth2 env vars
+  3. The server authorization config is injected via install.sh --set flags (see below)
+
+  Server-side wiring (temporal.server.config.authorization) cannot be done via
+  a separate template because Helm subchart values cannot be mutated by sibling
+  templates. Instead, install.sh passes --set flags when auth.enabled: true.
+  See install.sh for the exact flags used.
+*/}}
+
+{{- $auth := .Values.auth }}
+{{- $dex  := .Values.dex }}
+
+{{/*
+  Resolve the JWKS URI and provider URL.
+  When dex.enabled: true, auto-populate from the Dex service URL.
+  Otherwise use the values supplied in auth.jwt / auth.ui.
+*/}}
+{{- $issuer := "" }}
+{{- $jwksUri := "" }}
+{{- if $dex.enabled }}
+  {{- $issuer  = (printf "%s" $dex.config.issuer) }}
+  {{- $jwksUri = (printf "%s/keys" $dex.config.issuer) }}
+{{- else }}
+  {{- $issuer  = $auth.ui.providerUrl }}
+  {{- $jwksUri = index ($auth.jwt.keySourceURIs) 0 | default "" }}
+{{- end }}
+
+---
+# Secret holding the OAuth2 client secret used by the Temporal UI.
+# When dex.enabled: true this is the Dex static client secret.
+# In production, create this secret separately and reference it via
+# auth.ui.existingSecret / auth.ui.existingSecretKey.
+{{- if $dex.enabled }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.auth.ui.existingSecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+type: Opaque
+stringData:
+  # Key name must be TEMPORAL_AUTH_CLIENT_SECRET — the upstream chart mounts all
+  # keys from additionalEnvSecretName as env vars using the key name verbatim.
+  TEMPORAL_AUTH_CLIENT_SECRET: {{ index $dex.config.staticClients 0 "secret" | quote }}
+{{- end }}
+
+{{/*
+  ConfigMap carrying the UI auth env vars.
+  Consumed by temporal web pod via envFrom or additionalEnv injection.
+  We use a ConfigMap for non-secret values and the Secret above for the client secret.
+*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-auth-ui-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  TEMPORAL_AUTH_ENABLED: "true"
+  TEMPORAL_AUTH_PROVIDER_URL: {{ $issuer | quote }}
+  TEMPORAL_AUTH_CLIENT_ID: {{ $auth.ui.clientId | quote }}
+  TEMPORAL_AUTH_CLIENT_SECRET: {{ index $dex.config.staticClients 0 "secret" | quote }}
+  TEMPORAL_AUTH_CALLBACK_URL: {{ $auth.ui.callbackUrl | quote }}
+  TEMPORAL_AUTH_SCOPES: {{ $auth.ui.scopes | quote }}
+{{- end }}
