@@ -615,17 +615,34 @@ After login, Dex issues a JWT and redirects back to the UI. The UI attaches the 
 
 ### Getting a JWT for SDK workers and CLI
 
-Dex only supports the **authorization code** flow — it does not support client credentials or password grants. Use the included helper script, which opens a browser tab, handles the PKCE login locally, and prints the access token:
+Dex only supports the **authorization code** flow — it does not support client credentials or password grants. Use the included helper script, which opens a browser tab, handles the PKCE login locally, and prints the tokens:
 
 ```bash
 # Opens a browser tab for Dex login (admin@temporal.io / admin)
-# Prints the access_token to stdout
+# stdout: access_token  (use for CLI and --grpc-meta)
+# stderr: id_token      (use as Bearer token for SDK workers — carries email/permissions claims)
+#         refresh_token (use to auto-refresh before expiry — no browser needed)
 cd temporal-helm-superchart
-JWT=$(go run scripts/dex-login.go)
-echo $JWT | cut -c1-40   # should start with eyJ
+go run scripts/dex-login.go
 ```
 
-The script uses the `temporal-cli` public Dex client with a local redirect on `localhost:7788`. No client secret is needed.
+For scripts that only need the token for `$()` capture, stdout is clean:
+
+```bash
+export TEMPORAL_TOKEN=$(go run scripts/dex-login.go)
+```
+
+The script uses the `temporal-cli` public Dex client (PKCE, no secret) with a local redirect on `localhost:7788`.
+
+> **id_token vs access_token**: Temporal's JWT claim mapper reads the `email` and `permissions` claims from the `id_token`. For SDK workers, pass the `id_token` as the Bearer token. For the `temporal` CLI (`--auth-token`), either token works — the CLI passes it as-is to the server which validates it.
+
+For production IDPs (Okta, Auth0, Keycloak) that support `client_credentials`, use that flow instead:
+
+```bash
+JWT=$(curl -s -X POST https://your-idp/oauth2/token \
+  -d "grant_type=client_credentials&client_id=temporal-worker&client_secret=..." \
+  | jq -r '.access_token')
+```
 
 For production IDPs (Okta, Auth0, Keycloak) that support `client_credentials`, use that flow instead:
 
@@ -662,7 +679,9 @@ Unauthenticated calls (without `--grpc-meta`) return `Request unauthorized.` imm
 
 ### Using the JWT with the Go SDK
 
-Pass the token as a gRPC metadata header using a `HeadersProvider`:
+Pass the token as a gRPC metadata header using a `HeadersProvider`. The SDK calls `GetHeaders` on every outgoing gRPC call, so the provider is the right place to handle token refresh — check expiry inside `GetHeaders` and re-fetch when needed.
+
+**Static token (local testing):**
 
 ```go
 import (
@@ -683,26 +702,171 @@ c, err := client.Dial(client.Options{
 })
 ```
 
-For production workers, use a `HeadersProvider` that re-fetches from the IDP before the token expires rather than a static value.
+**Auto-refreshing token (long-running workers):**
+
+Implement `HeadersProvider` to check the JWT `exp` claim before each call and silently refresh via the IDP's token endpoint when the token is near expiry:
+
+```go
+import (
+    "context"
+    "encoding/base64"
+    "encoding/json"
+    "net/http"
+    "net/url"
+    "strings"
+    "sync"
+    "time"
+
+    "go.temporal.io/sdk/client"
+)
+
+type tokenProvider struct {
+    mu           sync.Mutex
+    token        string
+    expiresAt    time.Time
+    refreshToken string
+    tokenURL     string // e.g. "http://host.docker.internal:30556/dex/token"
+    clientID     string // e.g. "temporal-cli"
+}
+
+func (p *tokenProvider) GetHeaders(ctx context.Context) (map[string]string, error) {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+    if time.Now().Add(60 * time.Second).After(p.expiresAt) {
+        if err := p.refresh(); err != nil {
+            return nil, err
+        }
+    }
+    return map[string]string{"authorization": "Bearer " + p.token}, nil
+}
+
+func (p *tokenProvider) refresh() error {
+    resp, err := http.PostForm(p.tokenURL, url.Values{
+        "grant_type":    {"refresh_token"},
+        "refresh_token": {p.refreshToken},
+        "client_id":     {p.clientID},
+    })
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    var result struct {
+        IDToken      string `json:"id_token"`
+        RefreshToken string `json:"refresh_token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return err
+    }
+    p.token = result.IDToken
+    if result.RefreshToken != "" {
+        p.refreshToken = result.RefreshToken // Dex may rotate the refresh token
+    }
+    p.expiresAt = jwtExpiry(result.IDToken)
+    return nil
+}
+
+// jwtExpiry decodes the JWT payload (no signature verification — server does that)
+// and returns the exp claim as a time.Time.
+func jwtExpiry(token string) time.Time {
+    parts := strings.Split(token, ".")
+    if len(parts) != 3 {
+        return time.Now().Add(time.Hour)
+    }
+    payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+    if err != nil {
+        return time.Now().Add(time.Hour)
+    }
+    var claims struct {
+        Exp int64 `json:"exp"`
+    }
+    if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+        return time.Now().Add(time.Hour)
+    }
+    return time.Unix(claims.Exp, 0)
+}
+```
+
+> **Token source**: `go run scripts/dex-login.go` prints both the `id_token` and `refresh_token`. Pass both to `tokenProvider` at startup. With Dex's default 24 h token lifetime and 1 minute refresh window, workers never need restarting.
 
 ### Using the JWT with the Java SDK
 
+Use `AuthorizationGrpcMetadataProvider` with an `AuthorizationTokenSupplier` — not `addGrpcClientInterceptor`. The metadata provider plugs into the SDK's innermost interceptor (`GrpcMetadataProviderInterceptor`) and covers all calls including internal ones like `GetSystemInfo`. Using `addGrpcClientInterceptor` places the interceptor before the SDK's `SystemInfoInterceptor` in the chain, so the auth header is missing from internal bootstrap calls and the connection fails immediately with `PERMISSION_DENIED`.
+
+**Static token (local testing):**
+
 ```java
+import io.temporal.authorization.AuthorizationGrpcMetadataProvider;
+import io.temporal.authorization.AuthorizationTokenSupplier;
+import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
-import io.grpc.Metadata;
-import io.grpc.stub.MetadataUtils;
 
-Metadata headers = new Metadata();
-headers.put(
-    Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-    "Bearer " + jwt
-);
+String token = System.getenv("TEMPORAL_TOKEN");
 
-WorkflowServiceStubsOptions options = WorkflowServiceStubsOptions.newBuilder()
-    .setTarget("localhost:7233")
-    .addGrpcMetadataProvider(MetadataUtils.newAttachHeadersInterceptor(headers)::interceptCall)
-    .build();
+WorkflowServiceStubs service = WorkflowServiceStubs.newServiceStubs(
+    WorkflowServiceStubsOptions.newBuilder()
+        .setTarget("localhost:7233")
+        .addGrpcMetadataProvider(new AuthorizationGrpcMetadataProvider(
+            () -> "Bearer " + token))
+        .build());
 ```
+
+**Auto-refreshing token (long-running workers):**
+
+`AuthorizationTokenSupplier` is a `@FunctionalInterface` called on every gRPC call. Implement it to check the JWT `exp` claim and refresh via Dex's token endpoint when the token is near expiry:
+
+```java
+import io.temporal.authorization.AuthorizationGrpcMetadataProvider;
+import io.temporal.authorization.AuthorizationTokenSupplier;
+
+public class DexTokenSupplier implements AuthorizationTokenSupplier {
+    private volatile String cachedToken;
+    private volatile Instant expiresAt;
+    private final String refreshToken;
+    private final String tokenUrl; // "http://host.docker.internal:30556/dex/token"
+    private final String clientId; // "temporal-cli"
+
+    public DexTokenSupplier(String initialToken, String refreshToken,
+                            String tokenUrl, String clientId) {
+        this.cachedToken  = initialToken;
+        this.expiresAt    = parseExpiry(initialToken);
+        this.refreshToken = refreshToken;
+        this.tokenUrl     = tokenUrl;
+        this.clientId     = clientId;
+    }
+
+    @Override
+    public synchronized String supply() {
+        if (Instant.now().isAfter(expiresAt.minusSeconds(60))) {
+            refresh();
+        }
+        return "Bearer " + cachedToken;
+    }
+
+    private void refresh() {
+        // POST grant_type=refresh_token to Dex token endpoint, parse id_token
+        // update cachedToken and expiresAt
+    }
+
+    private Instant parseExpiry(String jwt) {
+        // base64-decode the middle section, read the "exp" claim
+        String payload = jwt.split("\\.")[1];
+        byte[] decoded = Base64.getUrlDecoder().decode(payload);
+        // parse JSON, extract "exp" as epoch seconds
+        // return Instant.ofEpochSecond(exp)
+    }
+}
+
+// Wire it in:
+WorkflowServiceStubs service = WorkflowServiceStubs.newServiceStubs(
+    WorkflowServiceStubsOptions.newBuilder()
+        .setTarget("localhost:7233")
+        .addGrpcMetadataProvider(new AuthorizationGrpcMetadataProvider(
+            new DexTokenSupplier(idToken, refreshToken,
+                "http://host.docker.internal:30556/dex/token", "temporal-cli")))
+        .build());
+```
+
+> **Token source**: `go run scripts/dex-login.go` prints the `id_token` and `refresh_token`. Pass both at startup. The `supply()` method is called per-gRPC-call; token rotation happens transparently without restarting the worker.
 
 ### Namespace and role restrictions
 
@@ -891,6 +1055,11 @@ The Dex issuer URL must match exactly between the server config, the UI env var,
 
 **UI shows 403 / redirect loop after Dex login:**
 The server received a valid JWT but the claim mapper found no recognised email and granted no roles. Check that the JWT email matches an entry in `emailPermissions` in `images/server/auth/claim_mapper.go`, or that the JWT contains a `permissions` claim if using an external IDP.
+
+**UI loops back to login after Dex login succeeds (SSO callback loop):**
+Two possible causes:
+1. **Dex restarted** — Dex stores signing keys in memory (`storage: type: memory`). Any pod restart (including after `helm upgrade`) generates new keys. The browser has a cookie with a JWT signed by the old key, which the Temporal server now rejects with `RSA key not found for key ID: ...`. Fix: clear browser cookies/session for `localhost:30080` and log in again. For SDK workers, run `go run scripts/dex-login.go` to get a new token.
+2. **Missing JWKS URI** — The Temporal server has no `keySourceURIs` configured and cannot validate any JWT. Check: `helm get values temporal-stack -n temporal | grep -A5 authorization`. If empty, the `authorization:` block is missing from `values.yaml` under `temporal.server.config`. Fix: ensure `authorization:` is inside the same `config:` block as `persistence:` (not a separate sibling `config:` block — YAML silently drops duplicate keys).
 
 **`tdbg` returns `Request unauthorized`:**
 `tdbg` does not support passing a JWT. Use `internal-frontend` (port 7236) which bypasses JWT enforcement:

@@ -118,6 +118,18 @@ temporal:
           URI: "minio://temporal-visibility/visibility"
 
     config:
+      # JWT authorization config — stored here so `helm upgrade -f values.yaml` never loses
+      # the JWKS URI. When dex.enabled: true, keySourceURIs points at Dex's JWKS endpoint.
+      # For an external IDP, update keySourceURIs[0] to your IDP's JWKS URL.
+      authorization:
+        jwtKeyProvider:
+          keySourceURIs:
+            - "http://host.docker.internal:30556/dex/keys"
+          refreshInterval: 1m
+        permissionsClaimName: permissions
+        authorizer: default
+        claimMapper: default
+
       persistence:
         defaultStore: default
         visibilityStore: visibility

@@ -230,12 +230,10 @@ if [[ "$AUTH" == "true" ]]; then
   SECRET_NAME="$(awk '/^auth:/{found=1} found && /existingSecret:/{print $2; exit}' "$(dirname "$0")/values.yaml" | tr -d '"')"
   SECRET_KEY="$(awk '/^auth:/{found=1} found && /existingSecretKey:/{print $2; exit}' "$(dirname "$0")/values.yaml" | tr -d '"')"
 
+  # Authorization server config (jwtKeyProvider, authorizer, claimMapper) is now
+  # baked into values.yaml under temporal.server.config.authorization so that
+  # `helm upgrade -f values.yaml` always carries it. No --set flags needed here.
   AUTH_SET_FLAGS="
-    --set temporal.server.config.authorization.jwtKeyProvider.keySourceURIs[0]=${JWKS_URI}
-    --set temporal.server.config.authorization.jwtKeyProvider.refreshInterval=1m
-    --set temporal.server.config.authorization.permissionsClaimName=${PERMISSIONS_CLAIM}
-    --set temporal.server.config.authorization.authorizer=default
-    --set temporal.server.config.authorization.claimMapper=default
     --set temporal.web.additionalEnvConfigMapName=${RELEASE}-auth-ui-env
     --set temporal.web.additionalEnvSecretName=${SECRET_NAME}
   "

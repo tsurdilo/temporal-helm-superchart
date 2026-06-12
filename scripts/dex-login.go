@@ -127,10 +127,11 @@ func main() {
 	}
 
 	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		IDToken     string `json:"id_token"`
-		Error       string `json:"error"`
-		ErrorDesc   string `json:"error_description"`
+		AccessToken  string `json:"access_token"`
+		IDToken      string `json:"id_token"`
+		RefreshToken string `json:"refresh_token"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		log.Fatalf("Failed to parse token response: %v\n%s", err, body)
@@ -142,9 +143,21 @@ func main() {
 		log.Fatalf("No access_token in response: %s", body)
 	}
 
-	// Print only the access token to stdout (everything else goes to stderr)
-	// so callers can do: TOKEN=$(go run scripts/dex-login.go)
+	// Print only the access_token to stdout so callers can do:
+	//   export TEMPORAL_TOKEN=$(go run scripts/dex-login.go)
+	// All other tokens go to stderr for visibility but don't pollute $() capture.
 	fmt.Println(strings.TrimSpace(tokenResp.AccessToken))
+
+	// Print id_token and refresh_token to stderr — needed for SDK workers that
+	// auto-refresh. The id_token carries the email/permissions claims that
+	// Temporal's claim mapper reads; the refresh_token lets workers get new
+	// id_tokens without re-running the browser flow.
+	if tokenResp.IDToken != "" {
+		fmt.Fprintf(os.Stderr, "\nid_token (use this as Bearer token for SDK workers):\n%s\n", strings.TrimSpace(tokenResp.IDToken))
+	}
+	if tokenResp.RefreshToken != "" {
+		fmt.Fprintf(os.Stderr, "\nrefresh_token (keep this to auto-refresh before expiry):\n%s\n", strings.TrimSpace(tokenResp.RefreshToken))
+	}
 }
 
 func randomBase64(n int) string {
