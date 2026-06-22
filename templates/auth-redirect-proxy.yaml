@@ -1,0 +1,211 @@
+{{- if and .Values.auth.enabled .Values.auth.autoRedirect.enabled }}
+{{/*
+  auth-redirect-proxy.yaml — nginx proxy that auto-redirects unauthenticated
+  browsers to the OIDC provider, bypassing the "Continue to SSO" button page.
+
+  Resources:
+    1. ConfigMap  — nginx configuration
+    2. Deployment — nginx:alpine pod, mounts the ConfigMap
+    3. Service    — NodePort 30080; the web Service is moved to 30081 by install.sh
+
+  Why nginx instead of a server-side change:
+    The "Continue to SSO" button page is rendered by the Svelte SPA — the Go
+    ui-server has no config to skip it. nginx checks for the user0 cookie (the
+    short-lived handoff cookie the SPA sets after login) and redirects to
+    /auth/sso?returnUrl=<original-path> when it is absent.
+
+  user0 cookie lifetime: 1 minute (set in ui-server auth.go SetUser()).
+  After one minute a hard page reload triggers a Dex round-trip, but if the
+  Dex session is still active the user is redirected back immediately with no
+  credential re-entry required.
+*/}}
+
+{{- $webService := printf "%s-web" .Release.Name }}
+
+---
+# 1. ConfigMap — nginx configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-auth-redirect-proxy-conf
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  default.conf: |
+    map $cookie_refresh $needs_login {
+        ""      1;
+        default 0;
+    }
+
+    server {
+        listen 8090;
+
+        # Keep redirects relative so the browser stays on its original port (30080).
+        # Without this, nginx expands return 302 /path to http://host:8090/path.
+        absolute_redirect off;
+
+        # Use CoreDNS for runtime DNS resolution — prevents nginx from failing
+        # to start when the upstream Service is not yet resolvable at pod startup.
+        resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+        set $web "http://{{ $webService }}.{{ .Release.Namespace }}.svc.cluster.local:8080";
+
+        location /nginx-health {
+            return 200 "ok";
+            add_header Content-Type text/plain;
+        }
+
+        set $dex "http://{{ .Release.Name }}-dex.{{ .Release.Namespace }}.svc.cluster.local:5556";
+
+        location /dex/ {
+            proxy_pass         $dex;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        # /login interception: for full-page GETs (e.g. direct navigation or browser
+        # reload while on /login), redirect immediately to /auth/sso.
+        location = /login {
+            return 302 /auth/sso?returnUrl=/;
+        }
+
+        location /auth/ {
+            proxy_pass         $web;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        location ~* ^/(_app|css|codemirror|android|apple|banner|favicon|logo|site\.webmanifest|i18n)/ {
+            proxy_pass         $web;
+        }
+
+        location /api/ {
+            proxy_pass         $web;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        location / {
+            if ($needs_login) {
+                return 302 /auth/sso?returnUrl=$request_uri;
+            }
+
+            # Patch history.pushState in every HTML response so that the SPA
+            # logout flow — which does a client-side navigate to /login without
+            # making any HTTP request — is intercepted and redirected to
+            # /auth/sso instead of rendering the "Welcome back" button page.
+            #
+            # Why this is needed: the SPA logout function (source: nodes/2.Cux86bfe.js)
+            # clears auth state client-side and calls SvelteKit navigate('/login').
+            # SvelteKit uses history.pushState — nginx never sees the /login request.
+            # The patched pushState detects /login navigations and replaces them with
+            # window.location.assign('/auth/sso?returnUrl=...'), which is a real HTTP
+            # request that nginx CAN intercept.
+            # Patch the SPA's Content-Security-Policy <meta> tag to whitelist our
+            # injected script. The SPA uses strict-dynamic + a SHA256 hash allowlist;
+            # any inline script not in that list is blocked. We append our script's
+            # hash so the browser accepts it. Hash computed by Chrome from the exact
+            # script content below (reported in the CSP violation message).
+            sub_filter "'sha256-uu01iEKoNoci8OoT0vXXfA9/BWiT/ZzQPDi6Ex1FIyM='" "'sha256-uu01iEKoNoci8OoT0vXXfA9/BWiT/ZzQPDi6Ex1FIyM=' 'sha256-CYFoqx++JJFHMi0FKBL18S79BGyJwCUxPdGSf8EK4kk='";
+            sub_filter '</head>' '<script>(function(){var p=history.pushState.bind(history),r=history.replaceState.bind(history);function c(u){if(!u)return false;try{return new URL(String(u),window.location.origin).pathname.startsWith("/login")}catch(e){return false}}function s(u){try{var url=new URL(String(u),window.location.origin),ret=url.searchParams.get("returnUrl")||"/";try{ret=new URL(ret).pathname}catch(e){}window.location.assign("/auth/sso?returnUrl="+encodeURIComponent(ret))}catch(e){window.location.assign("/auth/sso?returnUrl=/")}}history.pushState=function(st,t,u){if(c(u)){s(u);return}p(st,t,u)};history.replaceState=function(st,t,u){if(c(u)){s(u);return}r(st,t,u)}})();</script></head>';
+            sub_filter_once  on;
+            sub_filter_types text/html;
+            proxy_buffering  on;
+            # Prevent upstream from gzip-compressing the response so sub_filter can scan it
+            proxy_set_header Accept-Encoding "";
+
+            proxy_pass         $web;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+    }
+
+---
+# 2. Deployment — nginx:alpine
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-auth-redirect-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: nginx
+          image: "{{ .Values.auth.autoRedirect.image.repository }}:{{ .Values.auth.autoRedirect.image.tag }}"
+          imagePullPolicy: {{ .Values.auth.autoRedirect.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /nginx-health
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /nginx-health
+              port: 8090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+          {{- with .Values.auth.autoRedirect.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ .Release.Name }}-auth-redirect-proxy-conf
+
+---
+# 3. Service — NodePort 30080 (web Service is moved to 30081 by install.sh)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-auth-redirect-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+      nodePort: 30080
+  selector:
+    app.kubernetes.io/name: {{ .Release.Name }}-auth-redirect-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

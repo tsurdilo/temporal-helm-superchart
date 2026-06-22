@@ -1,5 +1,6 @@
-# Planning docs — internal only
+# Planning docs and working drafts — internal only
 PLANNING.md
+tmp/
 
 # Local test utilities — not part of the chart
 test-worker/

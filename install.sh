@@ -28,6 +28,10 @@ AUTH_ENABLED="$(awk '/^auth:/{found=1} found && /^ *enabled:/{print $2; exit}' "
 DEX_ENABLED="$(awk '/^dex:/{found=1} found && /^ *enabled:/{print $2; exit}' "$(dirname "$0")/values.yaml")"
 [[ "$DEX_ENABLED" == "true" ]] && DEX=true || DEX=false
 
+# Read auth.autoRedirect.enabled from values.yaml
+AUTO_REDIRECT_ENABLED="$(awk '/^  autoRedirect:/{found=1} found && /^ *enabled:/{print $2; exit}' "$(dirname "$0")/values.yaml")"
+[[ "$AUTO_REDIRECT_ENABLED" == "true" ]] && AUTO_REDIRECT=true || AUTO_REDIRECT=false
+
 # Read tls.frontend.enabled and tls.internode.enabled from values.yaml
 TLS_FRONTEND_ENABLED="$(awk '
   /^tls:/        { in_tls=1; next }
@@ -237,6 +241,19 @@ if [[ "$AUTH" == "true" ]]; then
     --set temporal.web.additionalEnvConfigMapName=${RELEASE}-auth-ui-env
     --set temporal.web.additionalEnvSecretName=${SECRET_NAME}
   "
+
+  # When autoRedirect is enabled, nginx owns NodePort 30080 (the user-facing UI port).
+  # Move the web Service to NodePort 30081 so both Services stay type NodePort — this
+  # avoids the K8s validation error that would occur if we tried to set type=ClusterIP
+  # while the nodePort key still exists in values (upstream template uses hasKey check).
+  # The web pod remains reachable at 30081 for debugging but nginx is the public entry.
+  if [[ "$AUTO_REDIRECT" == "true" ]]; then
+    echo "  Auth auto-redirect enabled — nginx proxy owns NodePort 30080, web moves to 30081."
+    echo "  Routing Dex through nginx so OAuth flow stays on host.docker.internal:30080 (SameSite=Strict fix)."
+    AUTH_SET_FLAGS="$AUTH_SET_FLAGS
+      --set temporal.web.service.nodePort=30081
+    "
+  fi
 fi
 
 # TLS --set flags
@@ -385,6 +402,11 @@ else
     kubectl rollout status deployment/"$RELEASE"-dex -n "$NAMESPACE" --timeout=3m
     echo "  Dex ready."
   fi
+  if [[ "$AUTO_REDIRECT" == "true" ]]; then
+    echo "  Waiting for auth redirect proxy (nginx)..."
+    kubectl rollout status deployment/"$RELEASE"-auth-redirect-proxy -n "$NAMESPACE" --timeout=2m
+    echo "  Auth redirect proxy ready."
+  fi
   echo "  All services ready."
 fi
 
@@ -417,7 +439,13 @@ echo "════════════════════════�
 echo "  Install complete! (all $TOTAL_STEPS steps passed)"
 echo "══════════════════════════════════════════════"
 echo ""
-echo "  Temporal UI:  http://localhost:30080"
+if [[ "$AUTH" == "true" && "$AUTO_REDIRECT" == "true" ]]; then
+  echo "  Temporal UI:  http://host.docker.internal:30080"
+  echo "                (use host.docker.internal — required for SameSite=Strict OAuth cookies)"
+  echo "                (direct web pod: localhost:30081)"
+else
+  echo "  Temporal UI:  http://localhost:30080"
+fi
 if [[ "$AUTH" == "true" ]]; then
   echo "                (login: admin@temporal.io / admin)"
 fi

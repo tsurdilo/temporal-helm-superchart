@@ -124,7 +124,7 @@ temporal:
       authorization:
         jwtKeyProvider:
           keySourceURIs:
-            - "http://host.docker.internal:30556/dex/keys"
+            - "http://host.docker.internal:30080/dex/keys"
           refreshInterval: 1m
         permissionsClaimName: permissions
         authorizer: default
@@ -365,12 +365,33 @@ auth:
     clientId: temporal-ui
     # callbackUrl: must match the redirect URI registered with your IDP
     # For local Docker Desktop: http://<your-static-ip>:30080/auth/sso/callback
-    callbackUrl: "http://localhost:30080/auth/sso/callback"
-    scopes: "openid,profile,email"
+    callbackUrl: "http://host.docker.internal:30080/auth/sso/callback"
+    scopes: "openid,profile,email,offline_access"
     # Client secret — reference an existing K8s secret (never inline the value)
     # When dex.enabled: true this is auto-created from dex.staticClients[0].secret
     existingSecret: "temporal-dex-client-secret"
     existingSecretKey: "TEMPORAL_AUTH_CLIENT_SECRET"
+
+  # autoRedirect: skip the intermediate "Continue to SSO" login page and send
+  # unauthenticated browsers directly to the OIDC provider (Dex or external IDP).
+  #
+  # How it works: a small nginx Deployment is placed in front of the Temporal web
+  # pod. It checks for the user0 cookie (set by the UI after login). If absent,
+  # it issues a 302 to /auth/sso?returnUrl=<original-path>, which the UI server
+  # immediately forwards to the OIDC provider login page.
+  #
+  # When enabled: nginx owns NodePort 30080 (the UI endpoint). The web pod Service
+  # is moved to NodePort 30081. nginx proxies all traffic to the web pod; /auth/*
+  # and static assets always pass through without the cookie check.
+  #
+  # Only meaningful when auth.enabled: true. No effect when auth.enabled: false.
+  autoRedirect:
+    enabled: true
+    image:
+      repository: nginx
+      tag: alpine
+      pullPolicy: IfNotPresent
+    resources: {}
 
 # -----------------------------------------------------------------------------
 # Dex — bundled OIDC identity provider (local only)
@@ -388,7 +409,9 @@ dex:
     # browser on Docker Desktop. Docker Desktop should add this automatically but
     # sometimes omits it — see README "Prerequisites" for the one-time fix.
     # Production: set dex.enabled: false and use your own IDP with a real hostname.
-    issuer: http://host.docker.internal:30556/dex
+    # When autoRedirect=true, nginx proxies /dex/ so Dex must be issued at the
+    # nginx port (:30080) — keeps the entire OAuth flow on one origin (SameSite=Strict fix).
+    issuer: http://host.docker.internal:30080/dex
 
     storage:
       type: memory
@@ -413,9 +436,9 @@ dex:
         name: Temporal UI
         secret: temporal-ui-secret
         # redirectURIs must include every URL the browser may land on after login.
-        # Add your public hostname here if exposing via ingress.
+        # When autoRedirect=true, Dex is proxied through nginx — use host.docker.internal:30080.
         redirectURIs:
-          - http://localhost:30080/auth/sso/callback
+          - http://host.docker.internal:30080/auth/sso/callback
       - id: temporal-cli
         name: Temporal CLI/SDK
         # Public PKCE client — no secret. Used by scripts/dex-login.go to get

@@ -935,6 +935,56 @@ dex:
 
 Production IDPs typically issue JWTs with a `permissions` claim. The custom claim mapper detects this and routes to the default mapper path automatically — no code change needed.
 
+### Auto-redirect to OIDC provider (skip the login page)
+
+By default, when auth is enabled the Temporal UI shows an intermediate "Welcome back — Continue to SSO" page before redirecting to the OIDC provider. This is the UI's built-in behaviour and cannot be changed via configuration.
+
+To skip that page and send unauthenticated browsers directly to the Dex (or external IDP) login page, enable the auth redirect proxy:
+
+```yaml
+auth:
+  autoRedirect:
+    enabled: true
+```
+
+Then reinstall:
+
+```bash
+bash install.sh
+```
+
+**How it works:** a small nginx Deployment is placed in front of the Temporal web pod. It checks for the `refresh` cookie — the long-lived (7–30 days) HttpOnly cookie the UI sets after a successful login. If absent, nginx issues a `302` to `/auth/sso?returnUrl=<original-path>`, which the UI server immediately forwards to the OIDC provider login page. nginx also proxies `/dex/` directly to the Dex pod so the entire OAuth flow stays on one origin (required for `SameSite=Strict` cookie handling — see below).
+
+The following paths are handled specially:
+- `/dex/*` — proxied to the Dex pod; keeps the OAuth flow on a single hostname
+- `/auth/*` — proxied to the web pod unconditionally; the OIDC callback must never be intercepted
+- `/login` — always redirected to `/auth/sso`; handles the case where a browser lands on `/login` via a direct URL or a hard reload after logout
+- `/_app/`, `/css/`, `/favicon/`, and other static asset paths — proxied unconditionally
+- `/api/*` — proxied unconditionally; auth enforced by the server JWT layer, not nginx
+
+**Logout behaviour:** clicking logout in the Temporal UI does a client-side navigation to `/login` using the SvelteKit router (`history.pushState`) — no HTTP request ever reaches nginx, so the `location = /login` rule above cannot intercept it. To handle this, nginx injects a small script into every HTML response (via `sub_filter`) that patches `history.pushState` and `history.replaceState` before the SPA loads. When the logout function calls `navigate('/login')`, the patched push detects the `/login` prefix and calls `window.location.assign('/auth/sso?returnUrl=...')` instead — a real browser navigation that nginx intercepts and redirects to the Dex login page.
+
+Two nginx settings were required to make the injection work:
+- `proxy_set_header Accept-Encoding ""` — without this, the upstream sends gzip-compressed HTML based on the browser's `Accept-Encoding` header. nginx's `sub_filter` module cannot scan compressed content, so the injection is silently skipped.
+- `proxy_buffering on` — ensures the response is buffered before filters are applied.
+
+The Temporal UI enforces a Content Security Policy via a `<meta>` tag that blocks inline scripts not matching a known SHA256 hash. A second `sub_filter` patches that `<meta>` tag to add the injected script's hash. **If you modify the injected script, recompute the hash:** `echo -n '<script content>' | openssl dgst -sha256 -binary | base64`.
+
+**Port layout when autoRedirect is enabled:**
+
+| Service | Port | Description |
+|---|---|---|
+| nginx (auth redirect proxy) | `host.docker.internal:30080` | Public UI entry point |
+| Temporal web pod (direct) | `localhost:30081` | Direct access, bypasses nginx |
+
+> **Important (Docker Desktop):** access the UI via `http://host.docker.internal:30080`, not `localhost:30080`. The `SameSite=Strict` cookies set during the OAuth flow are tied to the `host.docker.internal` hostname. Using `localhost` breaks the callback because the browser treats them as different origins.
+
+The Temporal web pod moves to `30081` because K8s does not allow two NodePort Services to share the same port.
+
+**Disabling auto-redirect:** set `auth.autoRedirect.enabled: false` and reinstall. The nginx Deployment, ConfigMap, and Service are removed; the web Service NodePort returns to `30080`.
+
+---
+
 ### Disabling authentication (local dev only)
 
 Not recommended — but if you need a no-auth cluster for quick local testing, set `auth.enabled: false` and `dex.enabled: false` in `values.yaml` and reinstall. The server will use `authorizer=noop` and accept all connections without tokens.

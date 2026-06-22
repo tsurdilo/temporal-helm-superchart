@@ -24,8 +24,17 @@
 {{- $issuer := "" }}
 {{- $jwksUri := "" }}
 {{- if $dex.enabled }}
-  {{- $issuer  = (printf "%s" $dex.config.issuer) }}
-  {{- $jwksUri = (printf "%s/keys" $dex.config.issuer) }}
+  {{- if (and $auth.enabled $auth.autoRedirect.enabled) }}
+    {{- /* autoRedirect: nginx proxies /dex/ to the Dex pod. The browser must see Dex
+         on the same origin as the UI (host.docker.internal:30080) so SameSite=Strict
+         state/nonce cookies are sent to the callback. The web pod itself fetches OIDC
+         discovery from the internal K8s service (no nginx dependency at startup). */}}
+    {{- $issuer  = "http://host.docker.internal:30080/dex" }}
+    {{- $jwksUri = "http://host.docker.internal:30080/dex/keys" }}
+  {{- else }}
+    {{- $issuer  = (printf "%s" $dex.config.issuer) }}
+    {{- $jwksUri = (printf "%s/keys" $dex.config.issuer) }}
+  {{- end }}
 {{- else }}
   {{- $issuer  = $auth.ui.providerUrl }}
   {{- $jwksUri = index ($auth.jwt.keySourceURIs) 0 | default "" }}
@@ -68,9 +77,16 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
 data:
   TEMPORAL_AUTH_ENABLED: "true"
+  {{- if (and $auth.autoRedirect.enabled .Values.dex.enabled) }}
+  # autoRedirect: web pod fetches OIDC discovery from the internal Dex service directly
+  # (no nginx dependency at pod startup). ISSUER_URL carries the browser-facing URL so
+  # the ui-server uses host.docker.internal:30080/dex for the OAuth authorization_endpoint.
+  TEMPORAL_AUTH_PROVIDER_URL: "http://{{ .Release.Name }}-dex.{{ .Release.Namespace }}.svc.cluster.local:5556/dex"
+  TEMPORAL_AUTH_ISSUER_URL: {{ $issuer | quote }}
+  {{- else }}
   TEMPORAL_AUTH_PROVIDER_URL: {{ $issuer | quote }}
+  {{- end }}
   TEMPORAL_AUTH_CLIENT_ID: {{ $auth.ui.clientId | quote }}
-  TEMPORAL_AUTH_CLIENT_SECRET: {{ index $dex.config.staticClients 0 "secret" | quote }}
   TEMPORAL_AUTH_CALLBACK_URL: {{ $auth.ui.callbackUrl | quote }}
   TEMPORAL_AUTH_SCOPES: {{ $auth.ui.scopes | quote }}
 {{- end }}
