@@ -109,11 +109,32 @@ data:
             # The patched pushState detects /login navigations and replaces them with
             # window.location.assign('/auth/sso?returnUrl=...'), which is a real HTTP
             # request that nginx CAN intercept.
-            # Patch the SPA's Content-Security-Policy <meta> tag to whitelist our
-            # injected script. The SPA uses strict-dynamic + a SHA256 hash allowlist;
-            # any inline script not in that list is blocked. We append our script's
-            # hash so the browser accepts it. Hash computed by Chrome from the exact
-            # script content below (reported in the CSP violation message).
+            # TWO sub_filter directives work together to inject the logout interceptor:
+            #
+            # 1) CSP HASH PATCH
+            #    The Temporal UI sets a Content-Security-Policy via a <meta> tag using
+            #    strict-dynamic + a SHA256 allowlist. Any inline script not in that list
+            #    is silently blocked by the browser. We patch the <meta> tag to append
+            #    our script's hash so the browser accepts it.
+            #
+            #    There are TWO hashes to keep in sync when the UI version changes:
+            #
+            #    a) sha256-uu01iEKoNoci8OoT0vXXfA9/BWiT/ZzQPDi6Ex1FIyM=
+            #       This is the UI's OWN existing hash (from the <meta> tag in the HTML).
+            #       It changes when the Temporal UI image is upgraded. To find the new
+            #       value after an upgrade, curl any UI page and grep for the meta tag:
+            #         curl -s -b "refresh=<cookie>" http://<ui-host>/ | grep content-security-policy
+            #
+            #    b) sha256-CYFoqx++JJFHMi0FKBL18S79BGyJwCUxPdGSf8EK4kk=
+            #       This is OUR injected script's hash. It changes only if you edit the
+            #       script content in the sub_filter line below. To recompute after editing:
+            #         printf '%s' '<exact script content between <script> and </script> tags>' \
+            #           | openssl dgst -sha256 -binary | base64
+            #
+            # 2) SCRIPT INJECTION
+            #    Injects the actual interceptor script just before </head>. The script
+            #    patches history.pushState/replaceState so the SPA's client-side logout
+            #    navigate to /login becomes a real HTTP request to /auth/sso instead.
             sub_filter "'sha256-uu01iEKoNoci8OoT0vXXfA9/BWiT/ZzQPDi6Ex1FIyM='" "'sha256-uu01iEKoNoci8OoT0vXXfA9/BWiT/ZzQPDi6Ex1FIyM=' 'sha256-CYFoqx++JJFHMi0FKBL18S79BGyJwCUxPdGSf8EK4kk='";
             sub_filter '</head>' '<script>(function(){var p=history.pushState.bind(history),r=history.replaceState.bind(history);function c(u){if(!u)return false;try{return new URL(String(u),window.location.origin).pathname.startsWith("/login")}catch(e){return false}}function s(u){try{var url=new URL(String(u),window.location.origin),ret=url.searchParams.get("returnUrl")||"/";try{ret=new URL(ret).pathname}catch(e){}window.location.assign("/auth/sso?returnUrl="+encodeURIComponent(ret))}catch(e){window.location.assign("/auth/sso?returnUrl=/")}}history.pushState=function(st,t,u){if(c(u)){s(u);return}p(st,t,u)};history.replaceState=function(st,t,u){if(c(u)){s(u);return}r(st,t,u)}})();</script></head>';
             sub_filter_once  on;
