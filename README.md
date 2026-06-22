@@ -981,6 +981,8 @@ The Temporal UI enforces a Content Security Policy via a `<meta>` tag that block
 
 The Temporal web pod moves to `30081` because K8s does not allow two NodePort Services to share the same port.
 
+**External IDP (no Dex):** the `/dex/` proxy location is only needed when Dex is bundled. If you are using an external IDP (Okta, Auth0, Keycloak, etc.), remove the `/dex/` location block from the nginx config. Everything else — the cookie check, `history.pushState` injection, CSP patch, and `/login` redirect — applies unchanged regardless of which IDP you use.
+
 **Disabling auto-redirect:** set `auth.autoRedirect.enabled: false` and reinstall. The nginx Deployment, ConfigMap, and Service are removed; the web Service NodePort returns to `30080`.
 
 ---
