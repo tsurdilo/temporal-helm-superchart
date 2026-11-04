@@ -596,7 +596,6 @@ When the primary recovers, set `system.enableReadFromSecondaryVisibility` back t
 
 > **Important:** dual visibility is a last-resort migration tool, not an HA mechanism. The secondary receives no read traffic under normal operation. A primary store failure degrades reads until you manually flip the dynconfig key. For read HA, use Elasticsearch — it handles shard-level failover transparently without any Temporal-level routing.
 
-For a complete end-to-end failure simulation with exact commands and expected output, see **Phase 9 — Dual Visibility** in [TESTING.md](TESTING.md).
 
 ---
 

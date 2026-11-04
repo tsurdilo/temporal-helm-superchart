@@ -5,6 +5,8 @@ tmp/
 # Local test utilities — not part of the chart
 test-worker/
 test-backlog.sh
+TESTING.md
+upgrade-test.sh
 
 # IDE
 .idea/
