@@ -304,7 +304,11 @@ namespaceInit:
 # -----------------------------------------------------------------------------
 minio:
   enabled: true
-  image: minio/minio:latest
+  # The official minio/minio and minio/mc images were removed from Docker Hub. These are Bitnami's
+  # frozen archives of MinIO release 2025-05-24 and its client; they run as uid 1001 and keep data
+  # in /bitnami/minio/data. The web console does not respond with this build.
+  image: bitnamilegacy/minio:2025.5.24
+  clientImage: bitnamilegacy/minio-client:latest
   rootUser: minioadmin
   rootPassword: minioadmin
   buckets:

@@ -1,5 +1,14 @@
 # Temporal Stack — Helm Super-Chart
 
+> **MinIO images changed.** The official `minio/minio` and `minio/mc` images are no longer on
+> Docker Hub, so this chart now uses Bitnami's archived copies of the same MinIO release,
+> `bitnamilegacy/minio:2025.5.24` and `bitnamilegacy/minio-client:latest` (set in `values.yaml`
+> under `minio.image` and `minio.clientImage`). They run as user `1001` and keep data in
+> `/bitnami/minio/data`. MinIO storage is an `emptyDir` here, so there is no old data to migrate:
+> run `./install.sh` (or `helm upgrade`) as usual. **The MinIO web console does not respond with
+> this build**; see [MinIO and Archival](#minio-and-archival) for how to look at the buckets
+> instead.
+
 ## Why this exists
 
 The [official Temporal Helm chart](https://github.com/temporalio/helm-charts) is the foundation of this project — it handles all the complexity of deploying the Temporal server components (frontend, history, matching, worker) and does so extremely well. Without it, building something like this would require an enormous amount of work.
@@ -182,11 +191,13 @@ The script handles everything in the correct order:
 The first install takes 5–10 minutes as images are pulled. You will see output like:
 
 ```
-  Temporal UI:  http://localhost:30080
+  Temporal UI:  http://host.docker.internal:30080
+                (use host.docker.internal — required for SameSite=Strict OAuth cookies)
+                (direct web pod: localhost:30081)
                 (login: admin@temporal.io / admin)
   Grafana:      http://localhost:30300  (admin/admin)
   Prometheus:   http://localhost:30090
-  MinIO:        http://localhost:30901  (minioadmin/minioadmin)
+  MinIO:        http://localhost:30901  (minioadmin/minioadmin — console does not respond, see MinIO and Archival)
   Temporal gRPC: localhost:7233
                 (JWT required for SDK workers + CLI — see README Authentication section)
 ```
@@ -207,10 +218,10 @@ Once installed, the following services are available directly — no port-forwar
 
 | Service | URL | Notes |
 |---|---|---|
-| Temporal UI | [http://localhost:30080](http://localhost:30080) | Workflow management — redirects to Dex login. Default user: `admin@temporal.io` / `admin`. See [Authentication](#authentication). |
+| Temporal UI | [http://host.docker.internal:30080](http://host.docker.internal:30080) | Workflow management — redirects to Dex login. Default user: `admin@temporal.io` / `admin`. **Use `host.docker.internal`, not `localhost`**: with `localhost` the login fails with `State cookie did not match` ([why](#auto-redirect-to-oidc-provider-skip-the-login-page)). The web pod itself, without the login redirect, is at `localhost:30081`. See [Authentication](#authentication). |
 | Grafana | [http://localhost:30300](http://localhost:30300) | Dashboards (admin/admin) |
 | Prometheus | [http://localhost:30090](http://localhost:30090) | Metrics |
-| MinIO Console | [http://localhost:30901](http://localhost:30901) | Archival storage — login: minioadmin / minioadmin. History and visibility archival is enabled on the `default` namespace automatically at install time. |
+| MinIO Console | [http://localhost:30901](http://localhost:30901) | **Does not respond with the current `bitnamilegacy/minio` image** — list the buckets with `mc` instead (see [MinIO and Archival](#minio-and-archival)). Login would be minioadmin / minioadmin. History and visibility archival is enabled on the `default` namespace automatically at install time. |
 | Temporal Frontend (gRPC) | `localhost:7233` | SDK target — default port, no config needed. Kubernetes load-balances across both frontend replicas automatically. **Requires a JWT bearer token** — see [Authentication](#authentication). |
 | Dex (OIDC) | [http://host.docker.internal:30556/dex](http://host.docker.internal:30556/dex) | Local identity provider — issues JWTs for UI, CLI, and SDK workers. Must use `host.docker.internal` (not `localhost`) — this hostname resolves identically from browser, pods, and the Temporal server. |
 
@@ -381,7 +392,14 @@ To see all available keys and their compiled-in defaults, check the [dynamic con
 
 MinIO is deployed as a pod inside the `temporal` namespace and is used as the archival backend for workflow history and visibility. The `default` Temporal namespace has archival enabled automatically at install time — no manual setup required.
 
-The MinIO console is available at [http://localhost:30901](http://localhost:30901) (login: `minioadmin` / `minioadmin`). Archived workflow files appear in the `temporal-history` and `temporal-visibility` buckets.
+Archived workflow files appear in the `temporal-history` and `temporal-visibility` buckets. The MinIO console NodePort ([http://localhost:30901](http://localhost:30901)) is still created, but with the current `bitnamilegacy/minio` image nothing answers on it. To see what has been archived, list the buckets with the MinIO client from a throwaway pod:
+
+```bash
+kubectl run mc -n temporal --rm -i --restart=Never \
+  --image=bitnamilegacy/minio-client:latest --env=MC_CONFIG_DIR=/tmp/.mc --command -- \
+  sh -c 'mc alias set l http://temporal-stack-minio:9000 minioadmin minioadmin >/dev/null &&
+         mc ls --recursive l/temporal-history l/temporal-visibility'
+```
 
 ### Using with multiple clusters
 
@@ -605,7 +623,7 @@ To change or extend the mapping, edit `images/server/auth/claim_mapper.go` and r
 
 ### Logging in to the UI
 
-Open [http://localhost:30080](http://localhost:30080). You will be redirected to the Dex login page. Use the default static user:
+Open [http://host.docker.internal:30080](http://host.docker.internal:30080) — `host.docker.internal`, not `localhost`, or the login fails with `State cookie did not match`. You will be redirected to the Dex login page. Use the default static user:
 
 | Email | Password |
 |---|---|
@@ -1110,7 +1128,7 @@ The server received a valid JWT but the claim mapper found no recognised email a
 
 **UI loops back to login after Dex login succeeds (SSO callback loop):**
 Two possible causes:
-1. **Dex restarted** — Dex stores signing keys in memory (`storage: type: memory`). Any pod restart (including after `helm upgrade`) generates new keys. The browser has a cookie with a JWT signed by the old key, which the Temporal server now rejects with `RSA key not found for key ID: ...`. Fix: clear browser cookies/session for `localhost:30080` and log in again. For SDK workers, run `go run scripts/dex-login.go` to get a new token.
+1. **Dex restarted** — Dex stores signing keys in memory (`storage: type: memory`). Any pod restart (including after `helm upgrade`) generates new keys. The browser has a cookie with a JWT signed by the old key, which the Temporal server now rejects with `RSA key not found for key ID: ...`. Fix: clear browser cookies/session for `host.docker.internal:30080` and log in again. For SDK workers, run `go run scripts/dex-login.go` to get a new token.
 2. **Missing JWKS URI** — The Temporal server has no `keySourceURIs` configured and cannot validate any JWT. Check: `helm get values temporal-stack -n temporal | grep -A5 authorization`. If empty, the `authorization:` block is missing from `values.yaml` under `temporal.server.config`. Fix: ensure `authorization:` is inside the same `config:` block as `persistence:` (not a separate sibling `config:` block — YAML silently drops duplicate keys).
 
 **`tdbg` returns `Request unauthorized`:**

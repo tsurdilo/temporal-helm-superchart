@@ -43,7 +43,7 @@ kubectl get pods -n temporal | grep -v Running | grep -v Completed
 Expected: no output (every pod is Running or Completed).
 
 **Services accessible:**
-- Temporal UI → [http://localhost:30080](http://localhost:30080) — loads, shows `default` namespace
+- Temporal UI → [http://host.docker.internal:30080](http://host.docker.internal:30080) — loads, shows `default` namespace (use `host.docker.internal`, not `localhost`, when auth is on)
 - Grafana → [http://localhost:30300](http://localhost:30300) — loads, login admin/admin works
 - Prometheus → [http://localhost:30090](http://localhost:30090) — loads, Status → Targets shows temporal ServiceMonitors
 
@@ -74,7 +74,7 @@ temporal workflow execute \
 Or from any Go/Java/Python SDK app pointing at `localhost:7233` with no extra config.
 
 **What to look for:**
-- Workflow appears in the Temporal UI at http://localhost:30080
+- Workflow appears in the Temporal UI at http://host.docker.internal:30080
 - No `RESOURCE_EXHAUSTED` or connection errors
 
 ---
@@ -300,11 +300,21 @@ temporal workflow list \
 
 **Verify files exist in MinIO:**
 
-The MinIO console is exposed on NodePort 30901 — no port-forwarding needed:
+The MinIO console (NodePort 30901) does not respond with the current `bitnamilegacy/minio` image,
+so list the buckets with the MinIO client from a throwaway pod:
 
-Open [http://localhost:30901](http://localhost:30901) and log in with `minioadmin` / `minioadmin`.
+```bash
+kubectl run mc -n temporal --rm -i --restart=Never \
+  --image=bitnamilegacy/minio-client:latest --env=MC_CONFIG_DIR=/tmp/.mc --command -- \
+  sh -c 'mc alias set l http://temporal-stack-minio:9000 minioadmin minioadmin >/dev/null &&
+         mc ls --recursive l/temporal-history l/temporal-visibility'
+```
 
-Navigate to **Buckets** and check `temporal-history` and `temporal-visibility` — each should contain archived files under a path matching the workflow's namespace and run ID.
+The first archived files can take up to about five minutes to appear: the archival task runs at a
+random time up to `history.archivalProcessorArchiveDelay` (5 minutes by default) after the workflow
+closes.
+
+Both `temporal-history` and `temporal-visibility` should contain archived files under a path matching the workflow's namespace and run ID.
 
 ---
 
@@ -741,7 +751,7 @@ Expected: `Request unauthorized.`
 
 ### Step 3 — Verify the UI requires login and SSO works
 
-Open [http://localhost:30080](http://localhost:30080) in a browser.
+Open [http://host.docker.internal:30080](http://host.docker.internal:30080) in a browser. Use `host.docker.internal`, not `localhost`: with `localhost` the login ends in `State cookie did not match`.
 
 Expected: browser redirects to Dex login page at `http://host.docker.internal:30556/dex/auth?...`
 
@@ -751,7 +761,7 @@ Expected: browser redirects to Dex login page at `http://host.docker.internal:30
 
 Log in with `admin@temporal.io` / `admin`.
 
-Expected: redirected back to `http://localhost:30080/namespaces/default/workflows`. The namespace list is visible and no 403 errors appear in the browser console.
+Expected: redirected back to `http://host.docker.internal:30080/namespaces/default/workflows`. The namespace list is visible and no 403 errors appear in the browser console.
 
 ---
 
@@ -934,7 +944,7 @@ Expected: no errors. The server re-fetches Dex keys every 1 minute silently in t
 | # | Test | Pass |
 |---|------|------|
 | 1 | Fresh install completes, all pods Running | |
-| 2 | Temporal UI loads at localhost:30080 | |
+| 2 | Temporal UI loads at host.docker.internal:30080 | |
 | 3 | Grafana loads at localhost:30300 | |
 | 4 | Prometheus loads at localhost:30090 | |
 | 5 | `default` Temporal namespace exists | |

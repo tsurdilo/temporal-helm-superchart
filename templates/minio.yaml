@@ -20,8 +20,8 @@ spec:
     spec:
       containers:
         - name: minio
+          # Bitnami's own start script runs the server (API 9000, console 9001), so no args here.
           image: {{ .Values.minio.image }}
-          args: ["server", "/data", "--console-address", ":9001"]
           env:
             - name: MINIO_ROOT_USER
               value: {{ .Values.minio.rootUser | quote }}
@@ -46,7 +46,7 @@ spec:
             periodSeconds: 10
           volumeMounts:
             - name: data
-              mountPath: /data
+              mountPath: /bitnami/minio/data
       volumes:
         - name: data
           emptyDir: {}
@@ -97,7 +97,11 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: minio/mc:latest
+          image: {{ .Values.minio.clientImage }}
+          env:
+            # The image runs as uid 1001 with HOME=/, so mc cannot write its default config dir.
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
           command:
             - /bin/sh
             - -c

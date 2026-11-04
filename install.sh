@@ -451,7 +451,7 @@ if [[ "$AUTH" == "true" ]]; then
 fi
 echo "  Grafana:      http://localhost:30300  (admin/admin)"
 echo "  Prometheus:   http://localhost:30090"
-echo "  MinIO:        http://localhost:30901  (minioadmin/minioadmin)"
+echo "  MinIO:        http://localhost:30901  (console does not respond with the bitnamilegacy image — see README)"
 echo "  Temporal gRPC: localhost:7233"
 if [[ "$AUTH" == "true" ]]; then
   echo "                (JWT required for SDK workers + CLI — see README Authentication section)"
