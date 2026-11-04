@@ -5,9 +5,9 @@
 > `bitnamilegacy/minio:2025.5.24` and `bitnamilegacy/minio-client:latest` (set in `values.yaml`
 > under `minio.image` and `minio.clientImage`). They run as user `1001` and keep data in
 > `/bitnami/minio/data`. MinIO storage is an `emptyDir` here, so there is no old data to migrate:
-> run `./install.sh` (or `helm upgrade`) as usual. **The MinIO web console does not respond with
-> this build**; see [MinIO and Archival](#minio-and-archival) for how to look at the buckets
-> instead.
+> run `./install.sh` (or `helm upgrade`) as usual. **This build does not serve the MinIO web
+> console**, so the chart no longer exposes one (NodePort 30901 is gone); see
+> [MinIO and Archival](#minio-and-archival) for how to look at the buckets instead.
 
 ## Why this exists
 
@@ -197,7 +197,6 @@ The first install takes 5–10 minutes as images are pulled. You will see output
                 (login: admin@temporal.io / admin)
   Grafana:      http://localhost:30300  (admin/admin)
   Prometheus:   http://localhost:30090
-  MinIO:        http://localhost:30901  (minioadmin/minioadmin — console does not respond, see MinIO and Archival)
   Temporal gRPC: localhost:7233
                 (JWT required for SDK workers + CLI — see README Authentication section)
 ```
@@ -221,7 +220,6 @@ Once installed, the following services are available directly — no port-forwar
 | Temporal UI | [http://host.docker.internal:30080](http://host.docker.internal:30080) | Workflow management — redirects to Dex login. Default user: `admin@temporal.io` / `admin`. **Use `host.docker.internal`, not `localhost`**: with `localhost` the login fails with `State cookie did not match` ([why](#auto-redirect-to-oidc-provider-skip-the-login-page)). The web pod itself, without the login redirect, is at `localhost:30081`. See [Authentication](#authentication). |
 | Grafana | [http://localhost:30300](http://localhost:30300) | Dashboards (admin/admin) |
 | Prometheus | [http://localhost:30090](http://localhost:30090) | Metrics |
-| MinIO Console | [http://localhost:30901](http://localhost:30901) | **Does not respond with the current `bitnamilegacy/minio` image** — list the buckets with `mc` instead (see [MinIO and Archival](#minio-and-archival)). Login would be minioadmin / minioadmin. History and visibility archival is enabled on the `default` namespace automatically at install time. |
 | Temporal Frontend (gRPC) | `localhost:7233` | SDK target — default port, no config needed. Kubernetes load-balances across both frontend replicas automatically. **Requires a JWT bearer token** — see [Authentication](#authentication). |
 | Dex (OIDC) | [http://host.docker.internal:30556/dex](http://host.docker.internal:30556/dex) | Local identity provider — issues JWTs for UI, CLI, and SDK workers. Must use `host.docker.internal` (not `localhost`) — this hostname resolves identically from browser, pods, and the Temporal server. |
 
@@ -392,7 +390,7 @@ To see all available keys and their compiled-in defaults, check the [dynamic con
 
 MinIO is deployed as a pod inside the `temporal` namespace and is used as the archival backend for workflow history and visibility. The `default` Temporal namespace has archival enabled automatically at install time — no manual setup required.
 
-Archived workflow files appear in the `temporal-history` and `temporal-visibility` buckets. The MinIO console NodePort ([http://localhost:30901](http://localhost:30901)) is still created, but with the current `bitnamilegacy/minio` image nothing answers on it. To see what has been archived, list the buckets with the MinIO client from a throwaway pod:
+Archived workflow files appear in the `temporal-history` and `temporal-visibility` buckets. The `bitnamilegacy/minio` image does not serve the MinIO web console, so the chart no longer exposes one. To see what has been archived, list the buckets with the MinIO client from a throwaway pod:
 
 ```bash
 kubectl run mc -n temporal --rm -i --restart=Never \

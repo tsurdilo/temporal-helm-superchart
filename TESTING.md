@@ -300,8 +300,8 @@ temporal workflow list \
 
 **Verify files exist in MinIO:**
 
-The MinIO console (NodePort 30901) does not respond with the current `bitnamilegacy/minio` image,
-so list the buckets with the MinIO client from a throwaway pod:
+The `bitnamilegacy/minio` image does not serve a web console, so list the buckets with the MinIO
+client from a throwaway pod:
 
 ```bash
 kubectl run mc -n temporal --rm -i --restart=Never \
